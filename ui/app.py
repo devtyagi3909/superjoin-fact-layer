@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import time
 
 st.set_page_config(page_title="Superjoin Fact Layer", layout="wide")
 
@@ -9,14 +10,35 @@ st.markdown("AI agents for finance - Extract and compare facts from financial do
 
 with st.sidebar:
     st.header("Upload Document")
-    uploaded_file = st.file_uploader("Upload PDF or Spreadsheet", type=["pdf", "xlsx", "csv"])
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
     if uploaded_file is not None:
         if st.button("Process Document", type="primary"):
             with st.spinner("Processing document using LLM..."):
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                response = requests.post("http://localhost:8000/upload", files=files)
-                if response.status_code == 200:
-                    st.success(f"Document '{uploaded_file.name}' processed successfully!")
+                response = requests.post("http://localhost:8000/upload", files=files, timeout=30)
+                if response.status_code == 202:
+                    job_id = response.json()["job_id"]
+                    status = "queued"
+                    for _ in range(300):
+                        if status not in {"queued", "processing"}:
+                            break
+                        time.sleep(1)
+                        status_response = requests.get(
+                            f"http://localhost:8000/upload/{job_id}", timeout=10
+                        )
+                        status_response.raise_for_status()
+                        status_data = status_response.json()
+                        status = status_data["status"]
+                    else:
+                        st.error("Processing timed out; use the job ID to inspect the API status.")
+                        st.code(job_id)
+                        st.stop()
+                    if status in {"success", "partial"}:
+                        st.success(f"Document '{uploaded_file.name}' processed ({status}).")
+                        if status == "partial":
+                            st.warning("Some chunks failed; inspect the job status for details.")
+                    else:
+                        st.error(status_data.get("error", "Error processing document"))
                 else:
                     st.error("Error processing document")
 
