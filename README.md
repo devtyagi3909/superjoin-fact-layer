@@ -158,10 +158,19 @@ restart.
 ## Architecture and tradeoffs
 
 `core/parser.py` uses PyMuPDF for page-aware extraction, bounded overlapping
-chunks, a configurable total call budget, structured Gemini output, and a limited thread pool. Each fact keeps a
-stable ID plus document, page, and verbatim excerpt. An inverted lexical index
-selects candidate pairs without an all-pairs explosion; Gemini then reasons
-only over those candidates. Provider quota errors are normalized to a short
+chunks, a configurable total call budget, structured provider output, and a
+limited thread pool. Each fact keeps backwards-compatible document, page,
+value, and verbatim excerpt fields plus optional normalized subject/predicate,
+value/unit, time, scope, polarity, and explainable confidence breakdown
+metadata. Before a fact enters the ledger, its excerpt must occur in the
+source chunk, its page must match an authoritative page marker, and numeric
+values must occur in the excerpt; rejected claims are explicit
+`extraction_failure` records. An inverted lexical index selects candidate pairs
+without an all-pairs explosion. Deterministic gates require subject/predicate
+overlap, classify clear period/unit/scope differences as
+`explained_by_context`, and classify exact normalized same-scope values from
+independent documents as `corroboration`. Only ambiguous pairs and genuine
+contradiction reasoning reach the LLM. Provider quota errors are normalized to a short
 code/message/retry-after shape; only one short retry is attempted by default,
 and a session-level cooldown blocks new uploads before another provider call.
 The offline demo explicitly resets that cooldown. `api/main.py` owns validation and
@@ -172,11 +181,16 @@ source grounding. PDFs are streamed from an API-owned temporary source registry;
 the UI displays cited page metadata and requests the cited page where browser
 PDF viewers support it, while retaining page navigation as the reliable fallback.
 
-The tradeoff is deliberate: lexical retrieval is transparent and dependency
-light, but synonyms can be missed. In-memory state is easy to review locally,
-but a production deployment would use durable job storage and a vector index.
+The tradeoff is deliberate: lexical retrieval and deterministic gates are
+transparent and dependency-light, but synonyms and genuinely ambiguous context
+can still require the LLM. In-memory state is easy to review locally, but a
+production deployment would use durable job storage and a vector index.
 Scanned PDFs without an OCR layer may yield no text and are reported as a
-failure rather than silently producing unsupported claims.
+failure rather than silently producing unsupported claims. The four-case demo
+is explicit: same normalized value and scope is corroboration; different
+values with the same scope are a genuine contradiction; disjoint periods,
+units, or scopes are explained by context; malformed or unsupported evidence is
+an extraction/reasoning failure rather than a fabricated fact.
 
 ## Validation
 
