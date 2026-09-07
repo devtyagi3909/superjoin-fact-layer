@@ -161,6 +161,13 @@ Page markers are authoritative:
         extracted = 0
         chunks = list(self.iter_text_chunks(filepath, filename))
         total_chunks = len(chunks)
+        if not chunks:
+            return {
+                "status": "failed",
+                "message": f"No extractable text found in {filename}",
+                "facts_extracted": 0,
+                "errors": ["No extractable text found"],
+            }
 
         def extract(index_and_chunk):
             index, chunk = index_and_chunk
@@ -236,6 +243,32 @@ Page markers are authoritative:
                 pairs.add(tuple(sorted((i, j))))
         return [(facts[i], facts[j]) for i, j in pairs]
 
+    @staticmethod
+    def _ground_relationships(result: dict, facts: List[Fact]) -> dict:
+        """Replace model claim strings with the original evidence-backed facts."""
+        lookup: dict[str, list[Fact]] = defaultdict(list)
+        for fact in facts:
+            for key in (fact.text.strip().lower(), f"{fact.text} {fact.value or ''}".strip().lower()):
+                if key and fact not in lookup[key]:
+                    lookup[key].append(fact)
+        grounded = dict(result)
+        for group in ("corroborations", "contradictions"):
+            relationships = []
+            for relationship in result.get(group, []):
+                item = dict(relationship)
+                used_ids = set()
+                for field in ("fact_1", "fact_2"):
+                    claim = item.get(field)
+                    if isinstance(claim, str):
+                        matches = lookup.get(claim.strip().lower(), [])
+                        fact = next((candidate for candidate in matches if candidate.id not in used_ids), None)
+                        if fact is not None:
+                            used_ids.add(fact.id)
+                            item[field] = fact.model_dump()
+                relationships.append(item)
+            grounded[group] = relationships
+        return grounded
+
     def run_reasoning(self):
         facts = self.get_facts()
         if not facts:
@@ -278,7 +311,7 @@ Candidate pairs:
                     response_schema=ReasoningOutput,
                 ),
             )
-            result = json.loads(response.text)
+            result = self._ground_relationships(json.loads(response.text), facts)
             with self._lock:
                 self._reasoning_cache = (self._facts_version, result)
             return result
