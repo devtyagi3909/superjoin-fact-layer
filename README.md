@@ -1,123 +1,94 @@
 # Superjoin Fact Knowledge Layer
 
-This project implements a Fact Knowledge Layer designed to ingest financial documents (PDFs), extract meaningful semantic and numerical facts using a large language model (LLM), and perform cross-document reasoning to identify corroborations, genuine contradictions, and context-explained contradictions.
+An evidence-first document intelligence demo: upload one or more PDFs (or text
+fixtures), extract generic claims with page-level evidence, retrieve related
+claims, and classify their relationship as corroboration, genuine contradiction,
+contextual reconciliation, or an explicit failure. The implementation does not
+assume a company, filename, or financial vocabulary.
 
-Built as an exploration into AI agents for finance for the Superjoin Engineering Intern Hiring Assignment.
+## Run it locally
 
-## Setup and Run Instructions
-
-**Prerequisites:**
-- Python 3.10+
-- A Google Gemini API Key (`GEMINI_API_KEY` environment variable). The system uses Gemini 2.5 Pro for intelligent, dynamic fact extraction via Google GenAI SDK.
-
-1.  **Clone the repository & navigate to the folder:**
-    ```bash
-    git clone https://github.com/yourusername/superjoin-fact-layer.git
-    cd superjoin-fact-layer
-    ```
-
-2.  **Create and activate a virtual environment:**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
-
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **Set your API Key:**
-    ```bash
-    export GEMINI_API_KEY="your-gemini-api-key"
-    # Optional: override the model available in your Google GenAI project
-    export GEMINI_MODEL="gemini-3.5-flash"
-    # Optional: parallel Gemini requests per document (default: 4)
-    export GEMINI_MAX_WORKERS="4"
-    ```
-
-5.  **Run the application (Requires two terminal windows):**
-    
-    *Terminal 1 - Start the FastAPI backend:*
-    ```bash
-    python api/main.py
-    ```
-    
-    *Terminal 2 - Start the Streamlit UI:*
-    ```bash
-    streamlit run ui/app.py
-    ```
-    
-    The UI will be accessible at `http://localhost:8501`.
-
-### Try the included starter data
-
-The assignment bundle contains curated PDFs under `../delhivery/` and
-`../india-macroeconomy/`. Upload at least two documents from the same dataset to
-exercise cross-document reasoning. The API returns a `job_id` immediately:
+Requires Python 3.10+.
 
 ```bash
-curl -F "file=@../delhivery/01-delhivery-prospectus-2022-excerpt.pdf" \
-  http://localhost:8000/upload
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export GEMINI_API_KEY="..."
+export GEMINI_MODEL="gemini-3.5-flash"       # optional
+export GEMINI_MAX_WORKERS="4"                # optional
+python api/main.py                            # terminal 1
+streamlit run ui/app.py                       # terminal 2
+```
+
+Open <http://localhost:8501>. The API is at <http://localhost:8000>; `/health`
+is safe to use as a readiness check and never returns the key.
+
+## Deterministic demo path
+
+The UI accepts multiple files in one upload. For a repeatable credential-free
+smoke test, use the included plain-text fixtures (the same parser contract is
+used for PDFs):
+
+```bash
+curl -F "file=@demo/corroboration-a.txt" http://localhost:8000/upload
+curl -F "file=@demo/corroboration-b.txt" http://localhost:8000/upload
 curl http://localhost:8000/upload/<job_id>
 curl http://localhost:8000/facts
 curl http://localhost:8000/corroborations
 ```
 
-## Video Demo
+With Gemini configured, prepare four small documents that state: (1) the same
+claim and value from independent sources (**corroboration**), (2) different
+values for the same scope (**genuine contradiction**), (3) different periods,
+units, or scopes (**explained by context**), and (4) an unreadable or
+unsupported claim (**extraction/reasoning failure**). Upload them together,
+wait for each job to reach `success`, `partial`, or `failed`, then select
+**Run comparison**. The four tabs make each outcome and its evidence visible.
+Without a key, extraction jobs fail honestly with a structured error instead of
+fabricating facts; chunking, lifecycle, validation, and UI/API contracts remain
+testable offline.
 
-Add an unlisted video link before submission. It should be no longer than three
-minutes and show one upload, job polling, the facts table, and all four required
-outcomes. The repository is intentionally credential-free; reviewers can use
-the included sample PDFs with their own Gemini key.
+## API contract
 
-*The video demonstrates uploading documents, viewing the extracted facts linked to source evidence, and the reasoning engine correctly categorizing relationships.*
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /upload` | Queue one `.pdf` or `.txt` file; returns `202` and `{job_id, filename, status}` immediately. |
+| `POST /uploads` | Queue repeated `files` parts for batch processing; returns `202` and a `jobs` array. |
+| `GET /upload/{job_id}` | Poll `queued`, `processing`, `success`, `partial`, or `failed`; includes progress, chunk counts, result, and error. |
+| `GET /facts` | Return extracted claims and source/page excerpts currently held in memory. |
+| `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
+| `GET /health` | Return service readiness and whether a Gemini client is configured. |
 
-## Approach
+Uploads are capped at 25 MB by default (`MAX_UPLOAD_BYTES` can override it).
+State is intentionally in memory for the assignment demo and is cleared on
+restart.
 
-The system is designed with a **separation of concerns** representing modern AI product architectures:
+## Architecture and tradeoffs
 
-1.  **Core Parser (`core/parser.py`)**: Uses `PyMuPDF (fitz)` to accurately extract text from documents, maintaining page structures. It chunks the text, applies explicit `Pydantic` schemas, and sends it to the configured Gemini model using the `google-genai` structured outputs feature.
-    - *Why this matters*: Structured JSON schemas keep chunk results robust while bounded page-aware chunks avoid sending an entire large PDF in one request. Chunk requests run concurrently with a bounded worker pool (`GEMINI_MAX_WORKERS`) so large reports do not wait on dozens of sequential API calls. The model is configurable with `GEMINI_MODEL`.
-2.  **Retrieval and Reasoning**: An in-memory inverted lexical index selects a small set of related fact pairs before the LLM evaluates them. This avoids all-pairs comparisons and degrades with a clear failure when `GEMINI_API_KEY` is unavailable. Relationships are classified as `corroboration`, `genuine_contradiction`, `explained_by_context`, or `extraction_failure`.
-3.  **API (`api/main.py`)**: A `FastAPI` layer serves as the backbone. This means the knowledge layer isn't just a script—it's a microservice ready to be integrated into a larger IPO readiness platform.
-4.  **UI (`ui/app.py`)**: An evidence-first `Streamlit` dashboard for merchant bankers to inspect source excerpts, live job progress, and four explicit relationship cases.
+`core/parser.py` uses PyMuPDF for page-aware extraction, bounded overlapping
+chunks, structured Gemini output, and a limited thread pool. Each fact keeps a
+stable ID plus document, page, and verbatim excerpt. An inverted lexical index
+selects candidate pairs without an all-pairs explosion; Gemini then reasons
+only over those candidates. `api/main.py` owns validation and asynchronous job
+state, while `ui/app.py` is a small evidence-first Streamlit review workspace
+with progress, empty/error states, search/filtering through the fact table, and
+expandable evidence.
 
-## Limitations and Next Steps
+The tradeoff is deliberate: lexical retrieval is transparent and dependency
+light, but synonyms can be missed. In-memory state is easy to review locally,
+but a production deployment would use durable job storage and a vector index.
+Scanned PDFs without an OCR layer may yield no text and are reported as a
+failure rather than silently producing unsupported claims.
 
-**What doesn't work perfectly yet:**
-- Facts and job state are currently in memory and are lost when the server restarts.
-- The retrieval layer is deterministic lexical retrieval rather than a hosted vector database, so domain-specific synonyms may not match.
-- The four-case examples are data-dependent: without a Gemini key, the local
-  smoke tests verify extraction and job failure handling but cannot produce
-  live relationship classifications.
+## Validation
 
-### Representative output shape
-
-Each fact includes a stable ID and source evidence:
-
-```json
-{
-  "id": "generated-uuid",
-  "text": "Revenue increased during the reported period",
-  "value": "₹X crore",
-  "evidence": [{
-    "document_name": "annual-report.pdf",
-    "page": 42,
-    "excerpt": "verbatim supporting text"
-  }]
-}
+```bash
+python3 -m pytest -q
+python3 -m compileall -q core api ui
 ```
 
-Reasoning returns corroborations, contradictions (including contextual
-reconciliation), and explicit failures with explanations. No company-specific
-terms, filenames, or facts are hard-coded.
-
-**What I would build next (Next Steps):**
-- **Persistent Retrieval**: Replace the in-memory index with ChromaDB or Qdrant when durable storage and embeddings are required.
-- **Source Highlighting**: Pass exact bounding boxes from `PyMuPDF` to the frontend UI so users can click a fact and see the exact highlight on the original PDF.
-
-## Additional Notes
-
-- The system handles the 4 required edge cases entirely dynamically. The LLM is capable of realizing that a "Q4 Loss" and "FY24 Profit" might not be a contradiction (explained by context/time period).
-- The choice of FastAPI + Streamlit demonstrates backend robustness while shipping the frontend fast, simulating how an AI startup needs to operate.
+Tests cover incremental chunking, evidence preservation, empty inputs, batch
+uploads, extension validation, async lifecycle, health/API shape, and the
+four-case relationship response contract. Live Gemini classification requires
+`GEMINI_API_KEY`; all other checks run offline.

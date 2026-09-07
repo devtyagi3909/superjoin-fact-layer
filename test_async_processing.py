@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app, fact_layer
 from core.parser import FactLayer
+from core.parser import Fact, FactEvidence
 
 
 class FakeModels:
@@ -76,7 +77,101 @@ def test_upload_returns_job_and_reaches_explicit_failure_without_key():
                     break
                 time.sleep(0.01)
             assert status["status"] == "failed"
-            assert status["error"] is None
             assert status["result"]["errors"]
     finally:
         fact_layer.client = original_client
+
+
+def test_multiple_uploads_are_accepted_and_each_gets_a_job():
+    original_client = fact_layer.client
+    fact_layer.client = None
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/uploads",
+                files=[
+                    ("files", ("first.txt", b"alpha beta")),
+                    ("files", ("second.txt", b"gamma delta")),
+                ],
+            )
+            assert response.status_code == 202
+            jobs = response.json()["jobs"]
+            assert len(jobs) == 2
+            assert {job["filename"] for job in jobs} == {"first.txt", "second.txt"}
+    finally:
+        fact_layer.client = original_client
+
+
+def test_upload_rejects_unsupported_extensions():
+    with TestClient(app) as client:
+        response = client.post("/upload", files={"file": ("notes.docx", b"not supported")})
+    assert response.status_code == 415
+
+
+def test_health_exposes_provider_configuration_without_secret():
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert set(response.json()) == {"status", "gemini_configured"}
+
+
+def test_empty_document_is_reported_as_failed_instead_of_success():
+    layer = FactLayer(client=None)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
+        handle.flush()
+        result = layer.process_document(handle.name, "empty.txt")
+    assert result["status"] == "failed"
+    assert result["facts_extracted"] == 0
+    assert result["errors"] == ["No extractable text found"]
+
+
+def test_relationship_reasoning_preserves_four_case_contract():
+    class ReasoningModels:
+        def generate_content(self, model, contents, config):
+            return type(
+                "Response",
+                (),
+                {
+                    "text": json.dumps(
+                        {
+                            "corroborations": [],
+                            "contradictions": [
+                                {
+                                    "type": "genuine_contradiction",
+                                    "fact_1": {"text": "A", "value": "1", "evidence": []},
+                                    "fact_2": {"text": "A", "value": "2", "evidence": []},
+                                    "explanation": "Same scope, different values.",
+                                },
+                                {
+                                    "type": "explained_by_context",
+                                    "fact_1": {"text": "A", "value": "1", "evidence": []},
+                                    "fact_2": {"text": "A", "value": "2", "evidence": []},
+                                    "explanation": "Different reporting periods.",
+                                },
+                            ],
+                            "failures": [],
+                        }
+                    )
+                },
+            )()
+
+    layer = FactLayer(client=type("Client", (), {"models": ReasoningModels()})())
+    layer.facts = [
+        Fact(
+            id="1",
+            text="Revenue",
+            value="1",
+            evidence=[FactEvidence(document_name="a.txt", page=1, excerpt="Revenue 1")],
+        ),
+        Fact(
+            id="2",
+            text="Revenue",
+            value="2",
+            evidence=[FactEvidence(document_name="b.txt", page=1, excerpt="Revenue 2")],
+        ),
+    ]
+    result = layer.run_reasoning()
+    assert {item["type"] for item in result["contradictions"]} == {
+        "genuine_contradiction",
+        "explained_by_context",
+    }

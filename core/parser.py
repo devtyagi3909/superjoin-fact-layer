@@ -161,6 +161,13 @@ Page markers are authoritative:
         extracted = 0
         chunks = list(self.iter_text_chunks(filepath, filename))
         total_chunks = len(chunks)
+        if not chunks:
+            return {
+                "status": "failed",
+                "message": f"No extractable text found in {filename}",
+                "facts_extracted": 0,
+                "errors": ["No extractable text found"],
+            }
 
         def extract(index_and_chunk):
             index, chunk = index_and_chunk

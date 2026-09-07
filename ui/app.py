@@ -52,7 +52,8 @@ def render_job(job_id):
     elif status == "partial":
         st.warning("Finished with chunk-level failures. The successful evidence remains available.")
     elif status == "failed":
-        st.error(job.get("error") or "Processing failed.")
+        errors = (job.get("result") or {}).get("errors") or []
+        st.error(job.get("error") or (errors[0] if errors else "Processing failed."))
 
 
 def evidence_block(fact):
@@ -94,21 +95,26 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("## Process a PDF")
-    uploaded_file = st.file_uploader("Choose a source document", type=["pdf"])
-    if uploaded_file and st.button("Start extraction", type="primary", use_container_width=True):
+    st.markdown("## Process documents")
+    uploaded_files = st.file_uploader(
+        "Choose one or more source documents", type=["pdf", "txt"], accept_multiple_files=True
+    )
+    if uploaded_files and st.button("Start extraction", type="primary", use_container_width=True):
         try:
             response = requests.post(
-                f"{API_URL}/upload",
-                files={"file": (uploaded_file.name, uploaded_file.getvalue())},
+                f"{API_URL}/uploads",
+                files=[
+                    ("files", (uploaded_file.name, uploaded_file.getvalue()))
+                    for uploaded_file in uploaded_files
+                ],
                 timeout=30,
             )
             response.raise_for_status()
-            st.session_state["job_id"] = response.json()["job_id"]
+            st.session_state["job_ids"] = [job["job_id"] for job in response.json()["jobs"]]
         except requests.RequestException as exc:
             st.error(f"Upload failed: {exc}")
-    if st.session_state.get("job_id"):
-        render_job(st.session_state["job_id"])
+    for job_id in st.session_state.get("job_ids", []):
+        render_job(job_id)
     st.markdown("---")
     st.caption("The API uses bounded PDF chunks and parallel extraction workers. No credentials are stored in the UI.")
 
@@ -123,26 +129,43 @@ with left:
     st.subheader("Grounded fact register")
     st.caption(f"{len(facts)} extracted claims currently in memory")
     if facts:
-        rows = [
-            {
-                "Claim": fact.get("text", ""),
-                "Value": fact.get("value") or "",
-                "Source": (
-                    f"{fact.get('evidence', [{}])[0].get('document_name', 'Unknown')} "
-                    f"p.{fact.get('evidence', [{}])[0].get('page', '?')}"
-                ),
-            }
-            for fact in facts
-        ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        selected = st.selectbox(
-            "Inspect source evidence",
-            range(len(facts)),
-            format_func=lambda index: facts[index].get("text", "")[:100],
-        )
-        evidence_block(facts[selected])
+        query = st.text_input("Filter claims", placeholder="Search claim text, value, or source")
+        if query:
+            needle = query.lower()
+            facts = [
+                fact
+                for fact in facts
+                if needle in fact.get("text", "").lower()
+                or needle in (fact.get("value") or "").lower()
+                or any(
+                    needle in (item.get("document_name") or "").lower()
+                    for item in fact.get("evidence", [])
+                )
+            ]
+            st.caption(f"{len(facts)} claims match the filter")
+        if not facts:
+            st.info("No claims match that filter.")
+        else:
+            rows = [
+                {
+                    "Claim": fact.get("text", ""),
+                    "Value": fact.get("value") or "",
+                    "Source": (
+                        f"{fact.get('evidence', [{}])[0].get('document_name', 'Unknown')} "
+                        f"p.{fact.get('evidence', [{}])[0].get('page', '?')}"
+                    ),
+                }
+                for fact in facts
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            selected = st.selectbox(
+                "Inspect source evidence",
+                range(len(facts)),
+                format_func=lambda index: facts[index].get("text", "")[:100],
+            )
+            evidence_block(facts[selected])
     else:
-        st.info("Upload a PDF to populate the fact register.")
+        st.info("Upload one or more documents to populate the fact register.")
 
 with right:
     st.subheader("Review coverage")
