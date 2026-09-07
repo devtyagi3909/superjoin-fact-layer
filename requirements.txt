@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+streamlit
+llama-index
+pydantic
+python-multipart
+pytest
+PyMuPDF
+google-genai
+requests
+pandas
