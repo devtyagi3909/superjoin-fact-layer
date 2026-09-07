@@ -160,7 +160,21 @@ def test_health_exposes_provider_configuration_without_secret():
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    assert set(response.json()) == {"status", "gemini_configured"}
+    payload = response.json()
+    assert {"status", "provider", "model", "configured", "sdk_available", "error"} <= set(payload)
+    assert "test-key" not in str(payload)
+
+
+def test_provider_selection_supports_openai_compatible_environment(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.test/v1")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    layer = FactLayer(client=None)
+    status = layer.provider_status()
+    assert status["provider"] == "openai_compatible"
+    assert status["model"] == "test-model"
+    assert status["error"] in (None, "openai SDK is not installed. Install requirements.txt.")
 
 
 def test_empty_document_is_reported_as_failed_instead_of_success():

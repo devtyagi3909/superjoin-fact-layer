@@ -24,6 +24,20 @@ st.markdown(
     .case-card h3 { margin: 0; color: #111827; font-size: 1rem; }
     .case-card p { color: #667085; font-size: .9rem; }
     .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #344054; }
+    .label-text, .relationship-text, .empty-state, .provider-status { color: var(--text-color, #1f2937); }
+    .evidence strong, .evidence em { color: #1f2937; }
+    @media (prefers-color-scheme: dark) {
+      .case-card, .evidence { background: #182230; border-color: #344054; }
+      .case-card h3, .case-card p, .evidence, .evidence strong, .evidence em { color: #e7edf5; }
+      .hero h1, .hero p, .label-text, .relationship-text, .empty-state, .provider-status { color: #e7edf5; }
+    }
+    [data-theme="dark"] .case-card, [data-theme="dark"] .evidence { background: #182230; border-color: #344054; }
+    [data-theme="dark"] .case-card h3, [data-theme="dark"] .case-card p,
+    [data-theme="dark"] .evidence, [data-theme="dark"] .evidence strong,
+    [data-theme="dark"] .evidence em, [data-theme="dark"] .hero h1,
+    [data-theme="dark"] .hero p, [data-theme="dark"] .label-text,
+    [data-theme="dark"] .relationship-text, [data-theme="dark"] .empty-state,
+    [data-theme="dark"] .provider-status { color: #e7edf5; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -32,6 +46,14 @@ def api_get(path, timeout=30):
     response = requests.get(f"{API_URL}{path}", timeout=timeout)
     response.raise_for_status()
     return response.json()
+
+
+try:
+    provider_status = api_get("/health", timeout=5)
+    provider_label = provider_status.get("provider", "unknown")
+    provider_state = "ready" if provider_status.get("configured") else "not configured"
+except requests.RequestException:
+    provider_label, provider_state = "unavailable", "API offline"
 
 
 @st.fragment(run_every="2s")
@@ -79,6 +101,8 @@ def evidence_block(fact):
             f'<em>"{excerpt}"</em></div>',
             unsafe_allow_html=True,
         )
+        if provider_status.get("error"):
+            st.caption(provider_status["error"])
         document_name = item.get("document_name")
         if document_name:
             page_number = item.get("page") or 1
@@ -107,17 +131,23 @@ def evidence_block(fact):
 
 def claim_block(claim, label):
     if isinstance(claim, dict):
-        st.markdown(f"**{label}:** {claim.get('text') or claim}")
+        text = html.escape(str(claim.get("text") or claim))
+        st.markdown(f'<div class="label-text"><strong>{html.escape(label)}:</strong> {text}</div>', unsafe_allow_html=True)
         if claim.get("value"):
             st.caption(f"Value: {claim['value']}")
         evidence_block(claim)
     else:
-        st.write(f"**{label}:** {claim}")
+        st.markdown(
+            f'<div class="label-text"><strong>{html.escape(label)}:</strong> '
+            f'{html.escape(str(claim))}</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def relation_card(relation, label):
-    st.markdown(f"**{label}**")
-    st.write(relation.get("explanation") or "No explanation returned.")
+    st.markdown(f'<div class="label-text"><strong>{html.escape(label)}</strong></div>', unsafe_allow_html=True)
+    explanation = html.escape(relation.get("explanation") or "No explanation returned.")
+    st.markdown(f'<div class="relationship-text">{explanation}</div>', unsafe_allow_html=True)
     with st.expander("Inspect compared claims"):
         claim_block(relation.get("fact_1"), "Claim A")
         claim_block(relation.get("fact_2"), "Claim B")
@@ -176,6 +206,11 @@ st.markdown(
 
 with st.sidebar:
     st.markdown("## Process documents")
+    st.markdown(
+        f'<div class="provider-status"><strong>LLM provider:</strong> {html.escape(provider_label)} '
+        f'({html.escape(provider_state)})</div>',
+        unsafe_allow_html=True,
+    )
     uploaded_files = st.file_uploader(
         "Choose one or more source documents", type=["pdf", "txt"], accept_multiple_files=True
     )

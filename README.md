@@ -24,6 +24,31 @@ python api/main.py                            # terminal 1
 streamlit run ui/app.py                       # terminal 2
 ```
 
+Gemini is retained for backwards compatibility. To use a low-cost
+OpenAI-compatible provider instead, install the same requirements and configure
+one of these examples:
+
+```bash
+# Groq (OpenAI-compatible endpoint; models and limits vary by account)
+export LLM_PROVIDER=openai_compatible
+export LLM_API_KEY="gsk_..."
+export LLM_BASE_URL="https://api.groq.com/openai/v1"
+export LLM_MODEL="llama-3.1-8b-instant"
+
+# OpenRouter (many free or low-cost models; availability and limits change)
+export LLM_PROVIDER=openai_compatible
+export LLM_API_KEY="sk-or-..."
+export LLM_BASE_URL="https://openrouter.ai/api/v1"
+export LLM_MODEL="google/gemini-2.0-flash-exp:free"
+```
+
+`LLM_MODEL` and `LLM_BASE_URL` are required in practice to select the model and
+endpoint you want. Free tiers are subject to provider rate limits, model
+availability, credit requirements, and changing policies; they are not
+guaranteed. `LLM_API_KEY` is never returned by the API. If `LLM_PROVIDER` is
+omitted, `GEMINI_API_KEY` selects Gemini and `LLM_API_KEY` selects the
+OpenAI-compatible path.
+
 Open <http://localhost:8501>. The API is at <http://localhost:8000>; `/health`
 is safe to use as a readiness check and never returns the key.
 
@@ -71,7 +96,7 @@ results** restores the most recent comparison without another provider call.
 | `GET /source-file/{document_name}` | Stream a retained uploaded source for PDF preview. |
 | `POST /demo` | Load deterministic synthetic facts and four relationship cases without Gemini calls. |
 | `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
-| `GET /health` | Return service readiness and whether a Gemini client is configured. |
+| `GET /health` | Return readiness plus active provider, model, SDK availability, and configuration status (never credentials). |
 
 Uploads are capped at 25 MB by default (`MAX_UPLOAD_BYTES` can override it).
 State is intentionally in memory for the assignment demo and is cleared on

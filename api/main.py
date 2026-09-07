@@ -195,7 +195,8 @@ async def load_demo():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "gemini_configured": fact_layer.client is not None}
+    provider = fact_layer.provider_status()
+    return {"status": "ok", "gemini_configured": provider["provider"] == "gemini" and provider["configured"], **provider}
 
 
 @app.get("/corroborations")
