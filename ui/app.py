@@ -1,115 +1,206 @@
-import streamlit as st
-import requests
+import html
+
 import pandas as pd
+import requests
+import streamlit as st
 
-st.set_page_config(page_title="Superjoin Fact Layer", layout="wide")
 
-st.title("📄 Superjoin Fact Knowledge Layer")
-st.markdown("AI agents for finance - Extract and compare facts from financial documents.")
-
+st.set_page_config(page_title="Fact Layer", page_icon=None, layout="wide")
 API_URL = "http://localhost:8000"
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stAppViewContainer"] { background: #f7f8fa; }
+    [data-testid="stSidebar"] { background: #101827; }
+    [data-testid="stSidebar"] * { color: #e7edf5; }
+    .hero { padding: 1.5rem 0 1rem; }
+    .eyebrow { color: #2563eb; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .hero h1 { color: #111827; font-size: 2.2rem; margin: .2rem 0; }
+    .hero p { color: #667085; font-size: 1.05rem; }
+    .case-card { background: white; border: 1px solid #e4e7ec; border-radius: 12px; padding: 1rem; min-height: 130px; }
+    .case-card h3 { margin: 0; color: #111827; font-size: 1rem; }
+    .case-card p { color: #667085; font-size: .9rem; }
+    .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #344054; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def api_get(path, timeout=30):
+    response = requests.get(f"{API_URL}{path}", timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 @st.fragment(run_every="2s")
-def show_job_status(job_id):
+def render_job(job_id):
     try:
-        response = requests.get(f"{API_URL}/upload/{job_id}", timeout=10)
-        response.raise_for_status()
-        job = response.json()
-        st.info(f"Job `{job_id}`: **{job['status']}**")
-        if job["status"] == "partial":
-            st.warning("Some chunks failed; inspect the job status for details.")
-        elif job["status"] == "failed":
-            st.error(job.get("error") or (job.get("result") or {}).get("errors") or "Processing failed")
-        elif job["status"] == "success":
-            st.success(f"Processed {job['filename']}.")
-        return job
+        job = api_get(f"/upload/{job_id}", timeout=10)
     except requests.RequestException as exc:
         st.error(f"Could not read job status: {exc}")
-        return None
+        return
+    status = job["status"]
+    st.progress(job.get("progress", 0) / 100, text=f"{status.title()} - {job.get('progress', 0)}%")
+    st.caption(
+        f"{job.get('chunks_completed', 0)}/{job.get('chunks_total') or '?'} chunks completed "
+        f"  |  job {job_id}"
+    )
+    if status == "success":
+        st.success(f"Finished {job['filename']}.")
+    elif status == "partial":
+        st.warning("Finished with chunk-level failures. The successful evidence remains available.")
+    elif status == "failed":
+        st.error(job.get("error") or "Processing failed.")
+
+
+def evidence_block(fact):
+    evidence = fact.get("evidence", [])
+    for item in evidence:
+        excerpt = html.escape(item.get("excerpt") or "No excerpt returned.")
+        source = html.escape(item.get("document_name") or "Unknown document")
+        page = item.get("page") or "?"
+        st.markdown(
+            f'<div class="evidence"><strong>{source}</strong> - page {page}<br>'
+            f'<em>"{excerpt}"</em></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def claim_block(claim, label):
+    if isinstance(claim, dict):
+        st.markdown(f"**{label}:** {claim.get('text') or claim}")
+        if claim.get("value"):
+            st.caption(f"Value: {claim['value']}")
+        evidence_block(claim)
+    else:
+        st.write(f"**{label}:** {claim}")
+
+
+def relation_card(relation, label):
+    st.markdown(f"**{label}**")
+    st.write(relation.get("explanation") or "No explanation returned.")
+    with st.expander("Inspect compared claims"):
+        claim_block(relation.get("fact_1"), "Claim A")
+        claim_block(relation.get("fact_2"), "Claim B")
+
+
+st.markdown(
+    '<div class="hero"><div class="eyebrow">Evidence-first document intelligence</div>'
+    '<h1>Fact Knowledge Layer</h1>'
+    '<p>Extract grounded claims, compare them across documents, and review uncertainty without losing the source.</p></div>',
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.header("Upload Document")
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
-    if uploaded_file is not None:
-        if st.button("Process Document", type="primary"):
-            with st.spinner("Processing document using LLM..."):
-                files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                response = requests.post(f"{API_URL}/upload", files=files, timeout=30)
-                if response.status_code == 202:
-                    job_id = response.json()["job_id"]
-                    st.session_state["job_id"] = job_id
-                    st.success(f"Submitted '{uploaded_file.name}'. The API is processing it in the background.")
-                    st.code(job_id)
-                else:
-                    st.error(f"Upload failed ({response.status_code}): {response.text}")
-
+    st.markdown("## Process a PDF")
+    uploaded_file = st.file_uploader("Choose a source document", type=["pdf"])
+    if uploaded_file and st.button("Start extraction", type="primary", use_container_width=True):
+        try:
+            response = requests.post(
+                f"{API_URL}/upload",
+                files={"file": (uploaded_file.name, uploaded_file.getvalue())},
+                timeout=30,
+            )
+            response.raise_for_status()
+            st.session_state["job_id"] = response.json()["job_id"]
+        except requests.RequestException as exc:
+            st.error(f"Upload failed: {exc}")
     if st.session_state.get("job_id"):
-        st.subheader("Current upload job")
-        show_job_status(st.session_state["job_id"])
+        render_job(st.session_state["job_id"])
+    st.markdown("---")
+    st.caption("The API uses bounded PDF chunks and parallel extraction workers. No credentials are stored in the UI.")
 
-st.header("🔍 Extracted Facts")
-if st.button("Refresh Facts"):
-    with st.spinner("Fetching facts..."):
-        response = requests.get(f"{API_URL}/facts", timeout=10)
-        if response.status_code == 200:
-            facts = response.json().get("facts", [])
-            if facts:
-                df_facts = []
-                for f in facts:
-                    evidence_doc = f["evidence"][0]["document_name"] if f.get("evidence") else "Unknown"
-                    page_num = f["evidence"][0].get("page", "") if f.get("evidence") else ""
-                    excerpt = f["evidence"][0]["excerpt"] if f.get("evidence") else ""
-                    
-                    df_facts.append({
-                        "Fact": f["text"],
-                        "Value": f["value"],
-                        "Source": f"{evidence_doc} (Page {page_num})",
-                        "Excerpt": excerpt
-                    })
-                st.dataframe(pd.DataFrame(df_facts), use_container_width=True)
-            else:
-                st.info("No facts extracted yet. Please upload and process a document.")
+facts = []
+try:
+    facts = api_get("/facts", timeout=20).get("facts", [])
+except requests.RequestException as exc:
+    st.warning(f"API unavailable: {exc}")
+
+left, right = st.columns([1.4, 1])
+with left:
+    st.subheader("Grounded fact register")
+    st.caption(f"{len(facts)} extracted claims currently in memory")
+    if facts:
+        rows = [
+            {
+                "Claim": fact.get("text", ""),
+                "Value": fact.get("value") or "",
+                "Source": (
+                    f"{fact.get('evidence', [{}])[0].get('document_name', 'Unknown')} "
+                    f"p.{fact.get('evidence', [{}])[0].get('page', '?')}"
+                ),
+            }
+            for fact in facts
+        ]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        selected = st.selectbox(
+            "Inspect source evidence",
+            range(len(facts)),
+            format_func=lambda index: facts[index].get("text", "")[:100],
+        )
+        evidence_block(facts[selected])
+    else:
+        st.info("Upload a PDF to populate the fact register.")
+
+with right:
+    st.subheader("Review coverage")
+    st.markdown(
+        '<div class="case-card"><h3>1. Corroboration</h3><p>Independent documents support the same claim.</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="case-card"><h3>2. Genuine contradiction</h3><p>Claims cannot both be true in the same scope.</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="case-card"><h3>3. Explained by context</h3><p>Period, unit, currency, or scope reconciles the difference.</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="case-card"><h3>4. Extraction or reasoning failure</h3><p>Uncertainty is surfaced instead of hidden.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+st.divider()
+st.subheader("Cross-document review")
+if st.button("Run comparison", type="primary"):
+    with st.spinner("Comparing retrieved candidate pairs..."):
+        try:
+            st.session_state["reasoning"] = api_get("/corroborations", timeout=180)
+        except requests.RequestException as exc:
+            st.error(f"Comparison failed: {exc}")
+
+data = st.session_state.get("reasoning")
+if data:
+    corroborations = data.get("corroborations", [])
+    contradictions = data.get("contradictions", [])
+    failures = data.get("failures", [])
+    tabs = st.tabs(["Corroboration", "Genuine contradiction", "Explained by context", "Failures"])
+    with tabs[0]:
+        if corroborations:
+            for item in corroborations:
+                relation_card(item, "Independent support")
         else:
-            st.error("Failed to fetch facts.")
-
-st.header("🧠 Reasoning Engine (Corroborations & Contradictions)")
-if st.button("Run Reasoning Engine"):
-    with st.spinner("Analyzing relationships between facts..."):
-        response = requests.get(f"{API_URL}/corroborations", timeout=120)
-        if response.status_code == 200:
-            data = response.json()
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("✅ Corroborations")
-                corroborations = data.get("corroborations", [])
-                if corroborations:
-                    for c in corroborations:
-                        with st.expander(f"Match: {c.get('fact_1', '')[:30]}..."):
-                            st.write(f"**Fact 1:** {c.get('fact_1')}")
-                            st.write(f"**Fact 2:** {c.get('fact_2')}")
-                            st.success(f"**Explanation:** {c.get('explanation')}")
-                else:
-                    st.info("No corroborations found.")
-            
-            with col2:
-                st.subheader("⚠️ Contradictions")
-                contradictions = data.get("contradictions", [])
-                if contradictions:
-                    for c in contradictions:
-                        with st.expander(f"Conflict: {c.get('fact_1', '')[:30]}..."):
-                            st.write(f"**Fact 1:** {c.get('fact_1')}")
-                            st.write(f"**Fact 2:** {c.get('fact_2')}")
-                            if c.get("type") == "explained_by_context":
-                                st.warning(f"**Contextual Explanation:** {c.get('explanation')}")
-                            else:
-                                st.error(f"**Genuine Contradiction:** {c.get('explanation')}")
-                else:
-                    st.info("No contradictions found.")
-                    
-            if data.get("failures"):
-                st.subheader("❌ Extraction Failures")
-                for f in data.get("failures", []):
-                    st.error(f.get("description", "Unknown error"))
+            st.info("No corroboration was returned for the retrieved candidates.")
+    with tabs[1]:
+        genuine = [item for item in contradictions if item.get("type") == "genuine_contradiction"]
+        if genuine:
+            for item in genuine:
+                relation_card(item, "Potential conflict")
+        else:
+            st.info("No genuine contradiction was returned.")
+    with tabs[2]:
+        contextual = [item for item in contradictions if item.get("type") == "explained_by_context"]
+        if contextual:
+            for item in contextual:
+                relation_card(item, "Context reconciles the claims")
+        else:
+            st.info("No context-explained contradiction was returned.")
+    with tabs[3]:
+        if failures:
+            for failure in failures:
+                st.error(f"{failure.get('type', 'failure')}: {failure.get('description', '')}")
+        else:
+            st.info("No extraction or reasoning failures were reported.")

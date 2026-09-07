@@ -26,7 +26,15 @@ def _set_job(job_id: str, **updates):
 def _process_job(job_id: str, filepath: str, filename: str):
     _set_job(job_id, status="processing")
     try:
-        result = fact_layer.process_document(filepath, filename)
+        def update_progress(completed, total):
+            _set_job(
+                job_id,
+                chunks_completed=completed,
+                chunks_total=total,
+                progress=round(completed / total * 100) if total else 100,
+            )
+
+        result = fact_layer.process_document(filepath, filename, progress_callback=update_progress)
         _set_job(job_id, status=result["status"], result=result, error=None)
     except Exception as exc:
         _set_job(job_id, status="failed", error=str(exc))
@@ -51,6 +59,9 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
             "status": "queued",
             "result": None,
             "error": None,
+            "chunks_completed": 0,
+            "chunks_total": None,
+            "progress": 0,
             "created_at": now,
             "updated_at": now,
         }
