@@ -13,38 +13,54 @@ API_URL = "http://localhost:8000"
 st.markdown(
     """
     <style>
-    [data-testid="stAppViewContainer"] { background: #f7f8fa; }
-    [data-testid="stAppViewContainer"] .stMarkdown, [data-testid="stAppViewContainer"] .stCaption,
-    [data-testid="stAppViewContainer"] label, [data-testid="stAppViewContainer"] p,
-    [data-testid="stAppViewContainer"] [data-baseweb="tab-list"] button,
-    [data-testid="stAppViewContainer"] [data-baseweb="select"] * { color: #1f2937 !important; }
-    [data-testid="stSidebar"] { background: #101827; }
-    [data-testid="stSidebar"] * { color: #e7edf5; }
-    [data-testid="stSidebar"] input, [data-testid="stSidebar"] [data-baseweb="select"] > div { color: #111827 !important; background: #ffffff !important; }
-    [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color: #1f2937 !important; }
+    :root { color-scheme: light; }
+    [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stMainBlockContainer"] {
+        background: #f7f8fa !important;
+        color: #111827 !important;
+    }
+    [data-testid="stAppViewContainer"] *,
+    [data-testid="stMain"] *,
+    [data-testid="stMainBlockContainer"] * { border-color: #d0d5dd; }
+    [data-testid="stMain"] .stMarkdown p,
+    [data-testid="stMain"] .stMarkdown li,
+    [data-testid="stMain"] .stMarkdown strong,
+    [data-testid="stMain"] .stMarkdown em,
+    [data-testid="stMain"] h1, [data-testid="stMain"] h2,
+    [data-testid="stMain"] h3, [data-testid="stMain"] h4,
+    [data-testid="stMain"] label, [data-testid="stMain"] [data-testid="stCaptionContainer"],
+    [data-testid="stMain"] [data-testid="stWidgetLabel"],
+    [data-testid="stMain"] [data-baseweb="tab-list"] button,
+    [data-testid="stMain"] [data-baseweb="tab-panel"],
+    [data-testid="stMain"] [data-testid="stExpander"] summary,
+    [data-testid="stMain"] [data-testid="stExpander"] summary p,
+    [data-testid="stMain"] [data-baseweb="select"] *,
+    [data-testid="stMain"] [data-testid="stProgress"] * { color: #111827 !important; }
+    [data-testid="stMain"] [data-baseweb="select"] > div,
+    [data-testid="stMain"] input, [data-testid="stMain"] textarea {
+        color: #111827 !important; background: #ffffff !important;
+    }
+    [data-testid="stMain"] button p, [data-testid="stMain"] button span { color: inherit !important; }
+    [data-testid="stSidebar"] { background: #101827 !important; color: #f9fafb !important; }
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color: #f9fafb !important; }
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] [data-baseweb="select"] > div { color: #111827 !important; background: #ffffff !important; }
+    [data-testid="stSidebar"] button p, [data-testid="stSidebar"] button span { color: inherit !important; }
+    [data-testid="stExpander"] summary { color: #111827 !important; }
     .hero { padding: 1.5rem 0 1rem; }
     .eyebrow { color: #2563eb; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
     .hero h1 { color: #111827; font-size: 2.2rem; margin: .2rem 0; }
-    .hero p { color: #667085; font-size: 1.05rem; }
+    .hero p { color: #111827; font-size: 1.05rem; }
     .case-card { background: white; border: 1px solid #e4e7ec; border-radius: 12px; padding: 1rem; min-height: 130px; }
     .case-card h3 { margin: 0; color: #111827; font-size: 1rem; }
-    .case-card p { color: #667085; font-size: .9rem; }
-    .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #344054; }
+    .case-card p { color: #111827; font-size: .9rem; }
+    .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #111827; }
     .label-text, .relationship-text, .empty-state, .provider-status { color: var(--text-color, #1f2937); }
-    .evidence strong, .evidence em { color: #1f2937; }
-    @media (prefers-color-scheme: dark) {
-      .case-card, .evidence { background: #182230; border-color: #344054; }
-      .case-card h3, .case-card p, .evidence, .evidence strong, .evidence em { color: #e7edf5; }
-      .hero h1, .hero p, .label-text, .relationship-text, .empty-state, .provider-status { color: #e7edf5; }
-    }
-    [data-theme="dark"] .case-card, [data-theme="dark"] .evidence { background: #182230; border-color: #344054; }
-    [data-theme="dark"] .case-card h3, [data-theme="dark"] .case-card p,
-    [data-theme="dark"] .evidence, [data-theme="dark"] .evidence strong,
-    [data-theme="dark"] .evidence em, [data-theme="dark"] .hero h1,
-    [data-theme="dark"] .hero p, [data-theme="dark"] .label-text,
-    [data-theme="dark"] .relationship-text, [data-theme="dark"] .empty-state,
-    [data-theme="dark"] .provider-status { color: #e7edf5; }
-    svg text { fill: #1f2937 !important; }
+    .evidence strong, .evidence em { color: #111827; }
+    svg text { fill: #111827 !important; }
     .stAlert p, .stAlert [data-testid="stMarkdownContainer"] { color: inherit !important; }
     </style>
     """,
@@ -61,6 +77,7 @@ try:
     provider_label = provider_status.get("provider", "unknown")
     provider_state = "ready" if provider_status.get("configured") else "not configured"
 except requests.RequestException:
+    provider_status = {}
     provider_label, provider_state = "unavailable", "API offline"
 
 
@@ -86,6 +103,10 @@ def render_job(job_id):
             st.caption("Successful evidence remains available. Upload again later to retry failed chunks.")
         else:
             st.warning("Finished with chunk-level failures. The successful evidence remains available.")
+        for error in (job.get("result") or {}).get("errors") or []:
+            if isinstance(error, dict):
+                chunk = f" (chunk {error['chunk']}/{error['chunks_total']})" if error.get("chunk") else ""
+                st.caption(f"{error.get('message', 'Chunk failed.')}{chunk}")
     elif status == "failed":
         errors = (job.get("result") or {}).get("errors") or []
         error = job.get("error") or (errors[0] if errors else None)
@@ -93,7 +114,20 @@ def render_job(job_id):
             st.error(error.get("message", "Gemini quota is temporarily exhausted."))
             st.caption("No automatic retry was started. Use offline demo or your last successful results.")
         elif isinstance(error, dict):
-            st.error(error.get("message", "Processing failed."))
+            chunk = error.get("chunk")
+            location = (
+                f" Failed chunk {chunk}/{error['chunks_total']}."
+                if chunk and error.get("chunks_total")
+                else ""
+            )
+            context = " | ".join(
+                str(error[key])
+                for key in ("provider", "model", "status")
+                if error.get(key) not in (None, "unknown")
+            )
+            st.error(f"{error.get('message', 'Processing failed.')}{location}")
+            if context:
+                st.caption(f"Provider diagnostics: {context}. Check /provider-diagnostics; no raw provider payload was retained.")
         else:
             st.error(error or "Processing failed.")
 
@@ -260,7 +294,11 @@ with st.sidebar:
     for job_id in st.session_state.get("job_ids", []):
         render_job(job_id)
     st.markdown("---")
-    st.caption("PDF calls are bounded for free-tier safety. Quota failures are concise and never retried automatically.")
+    st.caption(
+        f"Free-tier guard: up to {provider_status.get('max_chunks', '?')} extraction chunks per document "
+        f"({provider_status.get('max_retries', 0)} retry after a quota response). "
+        "Use offline demo for an immediate fallback; no retry loop is started."
+    )
 
 facts = []
 try:

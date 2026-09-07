@@ -151,6 +151,8 @@ def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
         return {"code": "provider_timeout", "message": f"{provider_name} timed out. Retry the request or use a smaller model.", "retry_after_seconds": None, "retryable": True}
     if any(term in text for term in ("response_format", "json_object", "structured output", "structured-output")):
         return {"code": "provider_structured_output", "message": f"{provider_name} rejected structured JSON output. Retrying without response_format.", "retry_after_seconds": None, "retryable": True}
+    if any(term in text for term in ("empty response", "empty/non-json", "non-json", "json decode", "expecting value")):
+        return {"code": "provider_response", "message": f"{provider_name} returned an empty or invalid JSON response.", "retry_after_seconds": None, "retryable": False}
     if any(term in text for term in ("400", "bad request", "invalid request")):
         return {"code": "provider_bad_request", "message": f"{provider_name} rejected the request. Check the model and endpoint configuration.", "retry_after_seconds": None, "retryable": False}
     return {
@@ -317,7 +319,15 @@ class FactLayer:
                         raise
                     request.pop("response_format")
                     response = self.client.chat.completions.create(**request)
-                return type("OpenAIResponse", (), {"text": response.choices[0].message.content})()
+                content = response.choices[0].message.content
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                if not isinstance(content, str) or not content.strip():
+                    raise RuntimeError("Provider returned an empty response.")
+                return type("OpenAIResponse", (), {"text": content})()
             except Exception as exc:
                 details = classify_provider_error(exc, self.provider)
                 if details["code"] != "provider_quota" or attempt >= self.max_retries:
@@ -362,7 +372,31 @@ Page markers are authoritative:
 {chunk}
 """
         response = self._generate_content(prompt, FactList)
-        return self._parse_json(response.text)
+        try:
+            return self._parse_json(response.text)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Provider returned empty/non-JSON content.") from exc
+
+    def _error_with_context(self, error: Exception, *, chunk_index: int | None = None, chunk_total: int | None = None) -> dict:
+        details = classify_provider_error(error, self.provider)
+        status = getattr(error, "status_code", None) or getattr(
+            getattr(error, "response", None), "status_code", None
+        )
+        if not status:
+            match = re.search(r"\b([45]\d{2})\b", str(error))
+            status = int(match.group(1)) if match else None
+        details.update(
+            {
+                "provider": self.provider,
+                "model": self.model,
+                "status": status or "unknown",
+            }
+        )
+        if chunk_index is not None:
+            details["chunk"] = chunk_index + 1
+        if chunk_total is not None:
+            details["chunks_total"] = chunk_total
+        return details
 
     @staticmethod
     def _parse_json(text: str) -> dict:
@@ -410,7 +444,9 @@ Page markers are authoritative:
                     )
                 return index, new_facts, None
             except Exception as exc:
-                return index, [], classify_provider_error(exc, self.provider)
+                return index, [], self._error_with_context(
+                    exc, chunk_index=index, chunk_total=total_chunks
+                )
 
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
             futures = [executor.submit(extract, item) for item in enumerate(chunks)]
