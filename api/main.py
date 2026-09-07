@@ -38,6 +38,8 @@ def _process_job(job_id: str, filepath: str, filename: str):
                 job_id,
                 chunks_completed=completed,
                 chunks_total=total,
+                provider_calls_completed=completed,
+                provider_calls_total=total,
                 progress=round(completed / total * 100) if total else 100,
             )
 
@@ -98,6 +100,8 @@ async def _queue_upload(background_tasks: BackgroundTasks, file: UploadFile) -> 
             "error": None,
             "chunks_completed": 0,
             "chunks_total": None,
+            "provider_calls_completed": 0,
+            "provider_calls_total": None,
             "progress": 0,
             "created_at": now,
             "updated_at": now,
@@ -214,7 +218,9 @@ async def health():
         "status": "ok",
         "gemini_configured": provider["provider"] == "gemini" and provider["configured"],
         "max_chunks": fact_layer.max_chunks,
+        "effective_max_chunks": fact_layer.max_chunks,
         "max_retries": fact_layer.max_retries,
+        "config_warnings": fact_layer.config_warnings,
         **provider,
     }
 

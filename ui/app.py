@@ -91,7 +91,8 @@ def render_job(job_id):
     status = job["status"]
     st.progress(job.get("progress", 0) / 100, text=f"{status.title()} - {job.get('progress', 0)}%")
     st.caption(
-        f"{job.get('chunks_completed', 0)}/{job.get('chunks_total') or '?'} chunks completed "
+        f"{job.get('provider_calls_completed', job.get('chunks_completed', 0))}/"
+        f"{job.get('provider_calls_total', job.get('chunks_total')) or '?'} provider calls completed "
         f"  |  job {job_id}"
     )
     if status == "success":
@@ -105,8 +106,10 @@ def render_job(job_id):
             st.warning("Finished with chunk-level failures. The successful evidence remains available.")
         for error in (job.get("result") or {}).get("errors") or []:
             if isinstance(error, dict):
-                chunk = f" (chunk {error['chunk']}/{error['chunks_total']})" if error.get("chunk") else ""
-                st.caption(f"{error.get('message', 'Chunk failed.')}{chunk}")
+                call = error.get("provider_call", error.get("chunk"))
+                total = error.get("provider_calls_total", error.get("chunks_total"))
+                location = f" (provider call {call}/{total})" if call and total else ""
+                st.caption(f"{error.get('message', 'Provider call failed.')}{location}")
     elif status == "failed":
         errors = (job.get("result") or {}).get("errors") or []
         error = job.get("error") or (errors[0] if errors else None)
@@ -116,8 +119,8 @@ def render_job(job_id):
         elif isinstance(error, dict):
             chunk = error.get("chunk")
             location = (
-                f" Failed chunk {chunk}/{error['chunks_total']}."
-                if chunk and error.get("chunks_total")
+                f" Failed provider call {chunk}/{error.get('provider_calls_total') or error.get('chunks_total')}."
+                if chunk and error.get("provider_calls_total", error.get("chunks_total"))
                 else ""
             )
             context = " | ".join(
@@ -295,7 +298,7 @@ with st.sidebar:
         render_job(job_id)
     st.markdown("---")
     st.caption(
-        f"Free-tier guard: up to {provider_status.get('max_chunks', '?')} extraction chunks per document "
+        f"Free-tier guard: up to {provider_status.get('effective_max_chunks', provider_status.get('max_chunks', '?'))} provider calls per document "
         f"({provider_status.get('max_retries', 0)} retry after a quota response). "
         "Use offline demo for an immediate fallback; no retry loop is started."
     )
