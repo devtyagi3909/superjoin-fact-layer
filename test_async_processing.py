@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 
 from api.main import app, fact_layer
-from core.parser import Fact, FactEvidence, FactLayer
+from core.parser import Fact, FactEvidence, FactLayer, ProviderQuotaError, classify_provider_error
 
 
 class FakeModels:
@@ -223,3 +223,64 @@ def test_relationship_reasoning_preserves_four_case_contract():
         "genuine_contradiction",
         "explained_by_context",
     }
+
+
+def test_quota_errors_are_structured_and_retry_after_is_concise():
+    error = classify_provider_error(
+        RuntimeError("429 RESOURCE_EXHAUSTED: RetryInfo retryDelay: 17s")
+    )
+    assert error == {
+        "code": "provider_quota",
+        "message": "Gemini quota is temporarily exhausted. Retry after about 17 seconds.",
+        "retry_after_seconds": 17,
+        "retryable": True,
+    }
+
+
+def test_quota_retry_honors_retry_after_without_raw_provider_blob(monkeypatch):
+    class RateLimitedModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED retryDelay: 1s secret provider payload")
+            return type("Response", (), {"text": '{"facts": []}'})()
+
+    client = type("Client", (), {"models": RateLimitedModels()})()
+    layer = FactLayer(client=client, max_workers=1)
+    monkeypatch.setattr("core.parser.time.sleep", lambda seconds: None)
+    result = layer._extract_chunk("text")
+    assert result == {"facts": []}
+    assert client.models.calls == 2
+
+
+def test_demo_path_is_deterministic_and_marks_simulated_results():
+    layer = FactLayer(client=None)
+    result = layer.load_demo()
+    assert result["demo"] is True
+    assert result["corroborations"]
+    assert {item["type"] for item in result["contradictions"]} == {
+        "genuine_contradiction",
+        "explained_by_context",
+    }
+    assert result["failures"][0]["type"] == "extraction_failure"
+
+
+def test_api_failure_shape_does_not_expose_provider_blob(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED RetryInfo retryDelay: 12s internal token dump")
+
+    monkeypatch.setattr(fact_layer, "process_document", fail)
+    with TestClient(app) as client:
+        response = client.post("/upload", files={"file": ("sample.txt", b"alpha beta")})
+        job_id = response.json()["job_id"]
+        for _ in range(20):
+            status = client.get(f"/upload/{job_id}").json()
+            if status["status"] not in {"queued", "processing"}:
+                break
+            time.sleep(0.01)
+    assert status["error"]["code"] == "provider_quota"
+    assert status["error"]["retry_after_seconds"] == 12
+    assert "internal token dump" not in str(status)

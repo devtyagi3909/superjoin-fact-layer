@@ -16,7 +16,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 export GEMINI_API_KEY="..."
 export GEMINI_MODEL="gemini-3.5-flash"       # optional
-export GEMINI_MAX_WORKERS="4"                # optional
+export GEMINI_MAX_WORKERS="2"                # optional; keep low on free tier
+export GEMINI_MAX_CHUNKS="8"                 # optional; groups pages, never drops them
+export GEMINI_MAX_RETRIES="1"                # optional; bounded 429 retry count
+export GEMINI_MAX_RETRY_WAIT_SECONDS="8"     # optional; no indefinite waits
 python api/main.py                            # terminal 1
 streamlit run ui/app.py                       # terminal 2
 ```
@@ -49,6 +52,10 @@ Without a key, extraction jobs fail honestly with a structured error instead of
 fabricating facts; chunking, lifecycle, validation, and UI/API contracts remain
 testable offline.
 
+The sidebar's **Load offline demo** button calls `POST /demo` and loads synthetic,
+clearly labeled facts for all four relationship cases without contacting Gemini.
+This is the recommended evaluator path when no provider quota is available.
+
 ## API contract
 
 | Endpoint | Purpose |
@@ -57,6 +64,7 @@ testable offline.
 | `POST /uploads` | Queue repeated `files` parts for batch processing; returns `202` and a `jobs` array. |
 | `GET /upload/{job_id}` | Poll `queued`, `processing`, `success`, `partial`, or `failed`; includes progress, chunk counts, result, and error. |
 | `GET /facts` | Return extracted claims and source/page excerpts currently held in memory. |
+| `POST /demo` | Load deterministic synthetic facts and four relationship cases without Gemini calls. |
 | `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
 | `GET /health` | Return service readiness and whether a Gemini client is configured. |
 
@@ -67,11 +75,13 @@ restart.
 ## Architecture and tradeoffs
 
 `core/parser.py` uses PyMuPDF for page-aware extraction, bounded overlapping
-chunks, structured Gemini output, and a limited thread pool. Each fact keeps a
+chunks, a configurable total call budget, structured Gemini output, and a limited thread pool. Each fact keeps a
 stable ID plus document, page, and verbatim excerpt. An inverted lexical index
 selects candidate pairs without an all-pairs explosion; Gemini then reasons
-only over those candidates. `api/main.py` owns validation and asynchronous job
-state, while `ui/app.py` is a small evidence-first Streamlit review workspace
+only over those candidates. Provider quota errors are normalized to a short
+code/message/retry-after shape; only one short retry is attempted by default,
+and the UI never retries automatically. `api/main.py` owns validation and
+asynchronous job state, while `ui/app.py` is a small evidence-first Streamlit review workspace
 with progress, empty/error states, search/filtering through the fact table, and
 expandable evidence.
 
@@ -90,5 +100,5 @@ python3 -m compileall -q core api ui
 
 Tests cover incremental chunking, evidence preservation and grounding, empty
 inputs, batch uploads, extension validation, async lifecycle, health/API shape,
-and the four-case relationship response contract. Live Gemini classification requires
+quota classification/retry handling, the offline demo, and the four-case relationship response contract. Live Gemini classification requires
 `GEMINI_API_KEY`; all other checks run offline.
