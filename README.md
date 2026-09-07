@@ -52,13 +52,29 @@ OpenAI-compatible path.
 Open <http://localhost:8501>. The API is at <http://localhost:8000>; `/health`
 is safe to use as a readiness check and never returns the key.
 
-For Groq, `openai/gpt-oss-120b` is the recommended model when it is available
-on your account. Check the live model catalog before configuring it:
+For Groq, use this configuration first. `openai/gpt-oss-120b` is recommended
+when available on your account; the model catalog can change:
 
 ```bash
+export LLM_PROVIDER=openai_compatible
+export LLM_API_KEY="gsk_..."
+export LLM_BASE_URL="https://api.groq.com/openai/v1"
+export LLM_MODEL="openai/gpt-oss-120b"
+
 curl -sS --oauth2-bearer "$LLM_API_KEY" \
   https://api.groq.com/openai/v1/models
 ```
+
+Run a tiny provider-only extraction check without exposing the key:
+
+```bash
+curl -sS "$LLM_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $LLM_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-oss-120b","temperature":0.1,"messages":[{"role":"user","content":"Return JSON only: {\"facts\":[{\"text\":\"The service handled 12 requests.\",\"value\":\"12\",\"excerpt\":\"handled 12 requests\",\"page\":1}]}"}]}'
+```
+
+The default `GEMINI_MAX_CHUNKS=8` is a provider-call cap, not a page drop:
+even a 28-page document is grouped into at most 8 provider calls.
 
 `/provider-diagnostics` exposes the active provider, model, endpoint, and a
 safe configuration hint. Never put a key in a debug script or commit it; revoke

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -16,6 +17,8 @@ except ImportError:  # Optional when an OpenAI-compatible provider is used.
     genai = None
     types = None
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class FactEvidence(BaseModel):
@@ -151,7 +154,7 @@ def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
         return {"code": "provider_timeout", "message": f"{provider_name} timed out. Retry the request or use a smaller model.", "retry_after_seconds": None, "retryable": True}
     if any(term in text for term in ("response_format", "json_object", "structured output", "structured-output")):
         return {"code": "provider_structured_output", "message": f"{provider_name} rejected structured JSON output. Retrying without response_format.", "retry_after_seconds": None, "retryable": True}
-    if any(term in text for term in ("empty response", "empty/non-json", "non-json", "json decode", "expecting value")):
+    if any(term in text for term in ("empty response", "empty/non-json", "non-json", "invalid json", "json decode", "expecting value")):
         return {"code": "provider_response", "message": f"{provider_name} returned an empty or invalid JSON response.", "retry_after_seconds": None, "retryable": False}
     if any(term in text for term in ("400", "bad request", "invalid request")):
         return {"code": "provider_bad_request", "message": f"{provider_name} rejected the request. Check the model and endpoint configuration.", "retry_after_seconds": None, "retryable": False}
@@ -178,16 +181,38 @@ class FactLayer:
         self.model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
         self.client = client if client is not None else self._build_client()
-        self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "2"))
-        self.max_chunks = int(os.getenv("GEMINI_MAX_CHUNKS", "8"))
-        self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
-        self.max_retry_wait = int(os.getenv("GEMINI_MAX_RETRY_WAIT_SECONDS", "8"))
+        self.config_warnings: list[str] = []
+        self.max_workers = self._safe_int("GEMINI_MAX_WORKERS", max_workers, 2, 1)
+        self.max_chunks = self._safe_int("GEMINI_MAX_CHUNKS", None, 8, 1)
+        self.max_retries = self._safe_int("GEMINI_MAX_RETRIES", None, 1, 0)
+        self.max_retry_wait = self._safe_int(
+            "GEMINI_MAX_RETRY_WAIT_SECONDS", None, 8, 1
+        )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._lock = threading.RLock()
         self._facts_version = 0
         self._reasoning_cache: tuple[int, dict] | None = None
         self._quota_cooldown_until = 0.0
+
+    def _safe_int(
+        self, name: str, explicit: Optional[int], default: int, minimum: int
+    ) -> int:
+        raw = explicit if explicit is not None else os.getenv(name, str(default))
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+            warning = f"{name}={raw!r} is invalid; using {default}."
+            self.config_warnings.append(warning)
+            logger.warning(warning)
+            return value
+        if value < minimum:
+            value = default
+            warning = f"{name}={raw!r} is below {minimum}; using {default}."
+            self.config_warnings.append(warning)
+            logger.warning(warning)
+        return value
 
     def _build_client(self) -> Any:
         if self.provider == "gemini":
@@ -228,6 +253,11 @@ class FactLayer:
             "configured": self.client is not None and error is None,
             "sdk_available": sdk_available,
             "error": error,
+            "max_chunks": self.max_chunks,
+            "max_workers": self.max_workers,
+            "max_retries": self.max_retries,
+            "max_retry_wait_seconds": self.max_retry_wait,
+            "config_warnings": list(self.config_warnings),
         }
 
     @staticmethod
@@ -311,6 +341,7 @@ class FactLayer:
                     "model": self.model,
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"},
+                    "temperature": 0.1,
                 }
                 try:
                     response = self.client.chat.completions.create(**request)
@@ -368,6 +399,8 @@ class FactLayer:
 Extract key factual claims from this document chunk. Return only claims supported by
 the text. For every claim provide a concise "text", a numerical or categorical
 "value" when present, a verbatim supporting "excerpt", and the source "page".
+Return one JSON object only, with a top-level "facts" array. Do not use markdown,
+code fences, commentary, or any text outside the JSON object.
 Page markers are authoritative:
 {chunk}
 """
@@ -375,7 +408,7 @@ Page markers are authoritative:
         try:
             return self._parse_json(response.text)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError("Provider returned empty/non-JSON content.") from exc
+            raise ValueError("Provider returned invalid JSON.") from exc
 
     def _error_with_context(self, error: Exception, *, chunk_index: int | None = None, chunk_total: int | None = None) -> dict:
         details = classify_provider_error(error, self.provider)
@@ -393,28 +426,47 @@ Page markers are authoritative:
             }
         )
         if chunk_index is not None:
+            details["provider_call"] = chunk_index + 1
             details["chunk"] = chunk_index + 1
         if chunk_total is not None:
+            details["provider_calls_total"] = chunk_total
             details["chunks_total"] = chunk_total
         return details
 
     @staticmethod
     def _parse_json(text: str) -> dict:
         """Decode provider output without inventing or repairing facts."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Provider returned invalid JSON.")
         candidate = text.strip()
         if candidate.startswith("```") and candidate.endswith("```"):
             candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I).strip()
-        parsed = json.loads(candidate)
-        if not isinstance(parsed, dict):
-            raise ValueError("Provider returned JSON that is not an object.")
-        return parsed
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        decoder = json.JSONDecoder()
+        objects = []
+        for match in re.finditer(r"\{", candidate):
+            try:
+                parsed, _ = decoder.raw_decode(candidate[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                objects.append(parsed)
+        if len(objects) == 1:
+            return objects[0]
+        raise ValueError("Provider returned invalid JSON.")
 
     def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
         extracted = 0
-        chunks = self._bounded_chunks(list(self.iter_text_chunks(filepath, filename)))
+        source_chunks = list(self.iter_text_chunks(filepath, filename))
+        chunks = self._bounded_chunks(source_chunks)
         total_chunks = len(chunks)
-        if not chunks:
+        if not source_chunks:
             return {
                 "status": "failed",
                 "message": f"No extractable text found in {filename}",
@@ -472,6 +524,8 @@ Page markers are authoritative:
             "message": f"Processed {filename}",
             "facts_extracted": extracted,
             "errors": errors,
+            "chunks_total": total_chunks,
+            "source_chunks_total": len(source_chunks),
             "quota": next((error for error in errors if isinstance(error, dict) and error["code"] == "provider_quota"), None),
         }
 

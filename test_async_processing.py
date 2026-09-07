@@ -284,8 +284,38 @@ def test_openai_compatible_retries_without_unsupported_structured_output():
 
 def test_json_parser_accepts_fenced_json_but_not_non_objects():
     assert FactLayer._parse_json("```json\n{\"facts\": []}\n```") == {"facts": []}
+    assert FactLayer._parse_json("Here is the result:\n{\"facts\": []}\nDone.") == {"facts": []}
     with pytest.raises((json.JSONDecodeError, ValueError)):
         FactLayer._parse_json("not JSON")
+    with pytest.raises(ValueError, match="invalid JSON"):
+        FactLayer._parse_json('{"facts": []} {"facts": []}')
+
+
+def test_invalid_chunk_cap_is_corrected_and_28_source_chunks_use_at_most_8_calls(monkeypatch):
+    monkeypatch.setenv("GEMINI_MAX_CHUNKS", "-1")
+
+    class EmptyModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, **_kwargs):
+            self.calls += 1
+            return type("Response", (), {"text": '{"facts": []}'})()
+
+    layer = FactLayer(
+        client=type("Client", (), {"models": EmptyModels()})(),
+        max_workers=1,
+    )
+    monkeypatch.setattr(layer, "iter_text_chunks", lambda *_args: iter(["chunk"] * 28))
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
+        handle.write("source")
+        handle.flush()
+        result = layer.process_document(handle.name, "sample.txt")
+    assert layer.max_chunks == 8
+    assert layer.config_warnings
+    assert result["source_chunks_total"] == 28
+    assert result["chunks_total"] <= 8
+    assert layer.client.models.calls == result["chunks_total"]
 
 
 def test_quota_retry_honors_retry_after_without_raw_provider_blob(monkeypatch):
@@ -398,6 +428,8 @@ def test_failed_chunk_reports_safe_provider_context_and_progress():
         "status": 401,
         "chunk": 1,
         "chunks_total": len(progress),
+        "provider_call": 1,
+        "provider_calls_total": len(progress),
     }
 
 
