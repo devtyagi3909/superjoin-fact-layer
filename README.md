@@ -30,6 +30,8 @@ Built as an exploration into AI agents for finance for the Superjoin Engineering
 4.  **Set your API Key:**
     ```bash
     export GEMINI_API_KEY="your-gemini-api-key"
+    # Optional: override the model available in your Google GenAI project
+    export GEMINI_MODEL="gemini-3.5-flash"
     ```
 
 5.  **Run the application (Requires two terminal windows):**
@@ -73,8 +75,8 @@ the included sample PDFs with their own Gemini key.
 
 The system is designed with a **separation of concerns** representing modern AI product architectures:
 
-1.  **Core Parser (`core/parser.py`)**: Uses `PyMuPDF (fitz)` to accurately extract text from documents, maintaining page structures. It chunks the text, applies explicit `Pydantic` schemas, and sends it to `gemini-2.5-pro` using the `google-genai` structured outputs feature.
-    - *Why this matters*: Structured JSON schemas keep chunk results robust while bounded page-aware chunks avoid sending an entire large PDF in one request.
+1.  **Core Parser (`core/parser.py`)**: Uses `PyMuPDF (fitz)` to accurately extract text from documents, maintaining page structures. It chunks the text, applies explicit `Pydantic` schemas, and sends it to the configured Gemini model using the `google-genai` structured outputs feature.
+    - *Why this matters*: Structured JSON schemas keep chunk results robust while bounded page-aware chunks avoid sending an entire large PDF in one request. The model is configurable with `GEMINI_MODEL`.
 2.  **Retrieval and Reasoning**: An in-memory inverted lexical index selects a small set of related fact pairs before the LLM evaluates them. This avoids all-pairs comparisons and degrades with a clear failure when `GEMINI_API_KEY` is unavailable. Relationships are classified as `corroboration`, `genuine_contradiction`, `explained_by_context`, or `extraction_failure`.
 3.  **API (`api/main.py`)**: A `FastAPI` layer serves as the backbone. This means the knowledge layer isn't just a script—it's a microservice ready to be integrated into a larger IPO readiness platform.
 4.  **UI (`ui/app.py`)**: A fast, responsive `Streamlit` dashboard for merchant bankers to inspect results. 

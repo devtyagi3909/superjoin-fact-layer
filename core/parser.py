@@ -67,6 +67,7 @@ class FactLayer:
     def __init__(self, client: Any = None, chunk_size: int = 12000, chunk_overlap: int = 400):
         self.facts: List[Fact] = []
         self.client = client if client is not None else self._build_client()
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._lock = threading.RLock()
@@ -136,7 +137,7 @@ Page markers are authoritative:
 {chunk}
 """
         response = self.client.models.generate_content(
-            model="gemini-3.5-flash",
+            model=self.model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -241,7 +242,7 @@ Candidate pairs:
 """
         try:
             response = self.client.models.generate_content(
-                model="gemini-3.5-flash",
+                model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
