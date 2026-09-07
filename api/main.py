@@ -4,10 +4,12 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 import uvicorn
 
 from core.parser import classify_provider_error, fact_layer
@@ -15,6 +17,9 @@ from core.parser import classify_provider_error, fact_layer
 app = FastAPI(title="Fact Knowledge Layer API")
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.RLock()
+_source_files: dict[str, str] = {}
+_source_lock = threading.RLock()
+_source_dir = Path(tempfile.mkdtemp(prefix="fact-layer-sources-"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 ALLOWED_EXTENSIONS = {".pdf", ".txt"}
 
@@ -45,9 +50,6 @@ def _process_job(job_id: str, filepath: str, filename: str):
             error=error,
             result={"status": "failed", "errors": [error], "quota": error if error["code"] == "provider_quota" else None},
         )
-    finally:
-        if os.path.exists(filepath):
-            os.remove(filepath)
 
 
 async def _queue_upload(background_tasks: BackgroundTasks, file: UploadFile) -> dict:
@@ -55,6 +57,9 @@ async def _queue_upload(background_tasks: BackgroundTasks, file: UploadFile) -> 
     suffix = os.path.splitext(filename)[1]
     if suffix.lower() not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Only PDF and plain-text documents are supported")
+    quota = fact_layer.quota_status()
+    if quota:
+        raise HTTPException(status_code=429, detail=quota)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         size = 0
         while chunk := await file.read(1024 * 1024):
@@ -64,6 +69,10 @@ async def _queue_upload(background_tasks: BackgroundTasks, file: UploadFile) -> 
                 raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit")
             temp_file.write(chunk)
         temp_filepath = temp_file.name
+    source_path = _source_dir / f"{uuid.uuid4()}{suffix.lower()}"
+    os.replace(temp_filepath, source_path)
+    with _source_lock:
+        _source_files[filename] = str(source_path)
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with _jobs_lock:
@@ -79,7 +88,7 @@ async def _queue_upload(background_tasks: BackgroundTasks, file: UploadFile) -> 
             "created_at": now,
             "updated_at": now,
         }
-    background_tasks.add_task(_process_job, job_id, temp_filepath, filename)
+    background_tasks.add_task(_process_job, job_id, str(source_path), filename)
     return {"job_id": job_id, "filename": filename, "status": "queued"}
 
 
@@ -120,6 +129,61 @@ async def get_upload_status(job_id: str):
 @app.get("/facts")
 async def get_facts():
     return {"facts": [fact.model_dump() for fact in fact_layer.get_facts()]}
+
+
+@app.get("/graph")
+async def get_graph():
+    return fact_layer.build_graph()
+
+
+def _source_path(document_name: str) -> Path:
+    safe_name = os.path.basename(document_name)
+    with _source_lock:
+        path = _source_files.get(safe_name)
+    if not path or safe_name != document_name:
+        raise HTTPException(status_code=404, detail="Source file is not available")
+    resolved = Path(path).resolve()
+    if resolved.parent != _source_dir.resolve() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Source file is not available")
+    return resolved
+
+
+@app.get("/source-preview")
+async def source_preview(
+    document_name: str = Query(...),
+    page: int = Query(1, ge=1),
+):
+    path = _source_path(document_name)
+    if path.suffix.lower() == ".pdf":
+        import fitz
+
+        with fitz.open(path) as document:
+            if page > len(document):
+                raise HTTPException(status_code=404, detail="Requested source page is unavailable")
+            return {
+                "document_name": document_name,
+                "kind": "pdf",
+                "page": page,
+                "page_count": len(document),
+                "text": document[page - 1].get_text(),
+                "url": f"/source-file/{document_name}",
+            }
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return {
+        "document_name": document_name,
+        "kind": "text",
+        "page": 1,
+        "page_count": 1,
+        "text": text,
+        "url": None,
+    }
+
+
+@app.get("/source-file/{document_name:path}")
+async def source_file(document_name: str):
+    path = _source_path(document_name)
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain"
+    return FileResponse(path, media_type=media_type, filename=document_name)
 
 
 @app.post("/demo")

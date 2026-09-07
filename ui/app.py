@@ -1,8 +1,10 @@
 import html
+from urllib.parse import quote
 
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(page_title="Fact Layer", page_icon=None, layout="wide")
@@ -26,8 +28,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
 def api_get(path, timeout=30):
     response = requests.get(f"{API_URL}{path}", timeout=timeout)
     response.raise_for_status()
@@ -61,7 +61,7 @@ def render_job(job_id):
         error = job.get("error") or (errors[0] if errors else None)
         if isinstance(error, dict) and error.get("code") == "provider_quota":
             st.error(error.get("message", "Gemini quota is temporarily exhausted."))
-            st.caption("No automatic retry was started. Wait for the stated window, then upload again.")
+            st.caption("No automatic retry was started. Use offline demo or your last successful results.")
         elif isinstance(error, dict):
             st.error(error.get("message", "Processing failed."))
         else:
@@ -79,6 +79,30 @@ def evidence_block(fact):
             f'<em>"{excerpt}"</em></div>',
             unsafe_allow_html=True,
         )
+        document_name = item.get("document_name")
+        if document_name:
+            page_number = item.get("page") or 1
+            try:
+                preview = api_get(
+                    f"/source-preview?document_name={quote(document_name)}&page={page_number}",
+                    timeout=10,
+                )
+            except requests.RequestException:
+                preview = None
+            if preview:
+                if preview["kind"] == "pdf":
+                    st.caption(
+                        f"PDF source: page {preview['page']} of {preview['page_count']}. "
+                        "Use the page controls in the viewer; browser PDF deep links vary by browser."
+                    )
+                    st.markdown(
+                        f'<iframe src="{API_URL}/source-file/{quote(document_name)}#page={page_number}" '
+                        'width="100%" height="420" style="border:1px solid #d0d5dd;border-radius:8px"></iframe>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    with st.expander("Preview text source"):
+                        st.code(preview["text"][:12000])
 
 
 def claim_block(claim, label):
@@ -97,6 +121,50 @@ def relation_card(relation, label):
     with st.expander("Inspect compared claims"):
         claim_block(relation.get("fact_1"), "Claim A")
         claim_block(relation.get("fact_2"), "Claim B")
+
+
+def render_graph(graph):
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+    positions = {
+        node["id"]: (80 + (index % 3) * 245, 70 + (index // 3) * 105)
+        for index, node in enumerate(nodes)
+    }
+    lines = []
+    for edge in edges:
+        if edge["source"] not in positions or edge["target"] not in positions:
+            continue
+        x1, y1 = positions[edge["source"]]
+        x2, y2 = positions[edge["target"]]
+        lines.append(
+            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+            f'stroke="{edge["color"]}" stroke-width="3" />'
+        )
+    circles = []
+    for node in nodes:
+        x, y = positions[node["id"]]
+        color = "#6b7280" if node["kind"] == "failure" else "#2563eb"
+        label = html.escape((node.get("label") or "")[:42])
+        value = html.escape(str(node.get("value") or ""))
+        circles.append(
+            f'<g><circle cx="{x}" cy="{y}" r="27" fill="{color}" opacity=".92"/>'
+            f'<text x="{x}" y="{y + 48}" text-anchor="middle" font-size="12" fill="#344054">{label}</text>'
+            f'<text x="{x}" y="{y + 64}" text-anchor="middle" font-size="11" fill="#667085">{value}</text></g>'
+        )
+    legend = " ".join(
+        f'<span style="color:{item["color"]};font-weight:700">● {html.escape(item["label"])}</span>'
+        for item in graph.get("legend", {}).values()
+    )
+    svg = (
+        '<div style="overflow:auto;background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:8px">'
+        f'<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px">{legend}</div>'
+        f'<svg viewBox="0 0 780 {max(170, ((len(nodes) + 2) // 3) * 105 + 80)}" '
+        'width="100%" role="img" aria-label="Interactive relationship graph">'
+        + "".join(lines)
+        + "".join(circles)
+        + "</svg></div>"
+    )
+    components.html(svg, height=320, scrolling=True)
 
 
 st.markdown(
@@ -130,9 +198,18 @@ with st.sidebar:
             response = requests.post(f"{API_URL}/demo", timeout=10)
             response.raise_for_status()
             st.session_state["reasoning"] = response.json()["result"]
-            st.success("Loaded synthetic demo data; no Gemini calls were made.")
+            st.session_state["job_ids"] = []
+            st.session_state["demo_mode"] = True
+            st.session_state["last_successful_reasoning"] = response.json()["result"]
+            st.success("Loaded synthetic demo data; previous upload errors were cleared.")
         except requests.RequestException as exc:
             st.error(f"Demo load failed: {exc}")
+    if st.session_state.get("last_successful_reasoning") and st.button(
+        "Use last successful results", use_container_width=True
+    ):
+        st.session_state["reasoning"] = st.session_state["last_successful_reasoning"]
+        st.session_state["job_ids"] = []
+        st.info("Showing the last successful comparison; no Gemini call was made.")
     for job_id in st.session_state.get("job_ids", []):
         render_job(job_id)
     st.markdown("---")
@@ -212,11 +289,37 @@ if st.button("Run comparison", type="primary"):
     with st.spinner("Comparing retrieved candidate pairs..."):
         try:
             st.session_state["reasoning"] = api_get("/corroborations", timeout=180)
+            st.session_state["last_successful_reasoning"] = st.session_state["reasoning"]
+            st.session_state["demo_mode"] = False
         except requests.RequestException as exc:
             st.error(f"Comparison failed: {exc}")
 
 data = st.session_state.get("reasoning")
 if data:
+    if data.get("demo"):
+        st.info("Offline demo mode: these facts are synthetic and clearly labeled.")
+    st.subheader("Interactive relationship graph")
+    try:
+        graph = api_get("/graph", timeout=20)
+        render_graph(graph)
+        graph_facts = [node for node in graph.get("nodes", []) if node.get("kind") == "fact"]
+        if graph_facts:
+            selected_node = st.selectbox(
+                "Select a graph fact to inspect its evidence",
+                graph_facts,
+                format_func=lambda node: node.get("label", "")[:100],
+            )
+            evidence_block(selected_node)
+        graph_edges = [edge for edge in graph.get("edges", []) if edge["source"] != edge["target"]]
+        if graph_edges:
+            selected_edge = st.selectbox(
+                "Select a relationship edge",
+                graph_edges,
+                format_func=lambda edge: edge.get("label", ""),
+            )
+            st.caption(selected_edge.get("explanation") or "No relationship explanation returned.")
+    except requests.RequestException as exc:
+        st.warning(f"Graph unavailable: {exc}")
     corroborations = data.get("corroborations", [])
     contradictions = data.get("contradictions", [])
     failures = data.get("failures", [])
