@@ -1,12 +1,32 @@
 import streamlit as st
 import requests
 import pandas as pd
-import time
 
 st.set_page_config(page_title="Superjoin Fact Layer", layout="wide")
 
 st.title("📄 Superjoin Fact Knowledge Layer")
 st.markdown("AI agents for finance - Extract and compare facts from financial documents.")
+
+API_URL = "http://localhost:8000"
+
+
+@st.fragment(run_every="2s")
+def show_job_status(job_id):
+    try:
+        response = requests.get(f"{API_URL}/upload/{job_id}", timeout=10)
+        response.raise_for_status()
+        job = response.json()
+        st.info(f"Job `{job_id}`: **{job['status']}**")
+        if job["status"] == "partial":
+            st.warning("Some chunks failed; inspect the job status for details.")
+        elif job["status"] == "failed":
+            st.error(job.get("error") or (job.get("result") or {}).get("errors") or "Processing failed")
+        elif job["status"] == "success":
+            st.success(f"Processed {job['filename']}.")
+        return job
+    except requests.RequestException as exc:
+        st.error(f"Could not read job status: {exc}")
+        return None
 
 with st.sidebar:
     st.header("Upload Document")
@@ -15,37 +35,23 @@ with st.sidebar:
         if st.button("Process Document", type="primary"):
             with st.spinner("Processing document using LLM..."):
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                response = requests.post("http://localhost:8000/upload", files=files, timeout=30)
+                response = requests.post(f"{API_URL}/upload", files=files, timeout=30)
                 if response.status_code == 202:
                     job_id = response.json()["job_id"]
-                    status = "queued"
-                    for _ in range(300):
-                        if status not in {"queued", "processing"}:
-                            break
-                        time.sleep(1)
-                        status_response = requests.get(
-                            f"http://localhost:8000/upload/{job_id}", timeout=10
-                        )
-                        status_response.raise_for_status()
-                        status_data = status_response.json()
-                        status = status_data["status"]
-                    else:
-                        st.error("Processing timed out; use the job ID to inspect the API status.")
-                        st.code(job_id)
-                        st.stop()
-                    if status in {"success", "partial"}:
-                        st.success(f"Document '{uploaded_file.name}' processed ({status}).")
-                        if status == "partial":
-                            st.warning("Some chunks failed; inspect the job status for details.")
-                    else:
-                        st.error(status_data.get("error", "Error processing document"))
+                    st.session_state["job_id"] = job_id
+                    st.success(f"Submitted '{uploaded_file.name}'. The API is processing it in the background.")
+                    st.code(job_id)
                 else:
-                    st.error("Error processing document")
+                    st.error(f"Upload failed ({response.status_code}): {response.text}")
+
+    if st.session_state.get("job_id"):
+        st.subheader("Current upload job")
+        show_job_status(st.session_state["job_id"])
 
 st.header("🔍 Extracted Facts")
 if st.button("Refresh Facts"):
     with st.spinner("Fetching facts..."):
-        response = requests.get("http://localhost:8000/facts")
+        response = requests.get(f"{API_URL}/facts", timeout=10)
         if response.status_code == 200:
             facts = response.json().get("facts", [])
             if facts:
@@ -70,7 +76,7 @@ if st.button("Refresh Facts"):
 st.header("🧠 Reasoning Engine (Corroborations & Contradictions)")
 if st.button("Run Reasoning Engine"):
     with st.spinner("Analyzing relationships between facts..."):
-        response = requests.get("http://localhost:8000/corroborations")
+        response = requests.get(f"{API_URL}/corroborations", timeout=120)
         if response.status_code == 200:
             data = response.json()
             
