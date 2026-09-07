@@ -136,7 +136,7 @@ Page markers are authoritative:
 {chunk}
 """
         response = self.client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-3.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -241,7 +241,7 @@ Candidate pairs:
 """
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-3.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
