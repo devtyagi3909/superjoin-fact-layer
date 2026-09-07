@@ -8,7 +8,7 @@ Built as an exploration into AI agents for finance for the Superjoin Engineering
 
 **Prerequisites:**
 - Python 3.10+
-- A Google Gemini API Key (`GEMINI_API_KEY` environment variable). The system uses Gemini 2.5 Pro for intelligent, dynamic fact extraction via Google GenAI SDK.
+- A Google Gemini API Key (`GEMINI_API_KEY` environment variable). The system uses the configurable `GEMINI_MODEL` (default `gemini-3.5-flash`) for dynamic fact extraction via the Google GenAI SDK.
 
 1.  **Clone the repository & navigate to the folder:**
     ```bash

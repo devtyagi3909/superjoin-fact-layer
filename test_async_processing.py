@@ -5,38 +5,39 @@ import json
 from fastapi.testclient import TestClient
 
 from api.main import app, fact_layer
-from core.parser import FactLayer
+from core.parser import Fact, FactEvidence, FactLayer
 
 
 class FakeModels:
-    def __init__(self):
+    def __init__(self, response_payload=None):
         self.prompts = []
+        self.calls = 0
+        self.response_payload = response_payload or {
+            "facts": [
+                {
+                    "text": "Revenue increased",
+                    "value": "100",
+                    "excerpt": "Revenue increased to 100",
+                    "page": 1,
+                }
+            ]
+        }
 
     def generate_content(self, model, contents, config):
+        self.calls += 1
         self.prompts.append(contents)
         return type(
             "Response",
             (),
             {
-                "text": json.dumps(
-                    {
-                        "facts": [
-                            {
-                                "text": "Revenue increased",
-                                "value": "100",
-                                "excerpt": "Revenue increased to 100",
-                                "page": 1,
-                            }
-                        ]
-                    }
-                )
+                "text": json.dumps(self.response_payload)
             },
         )()
 
 
 class FakeClient:
-    def __init__(self):
-        self.models = FakeModels()
+    def __init__(self, response_payload=None):
+        self.models = FakeModels(response_payload)
 
 
 def test_text_is_chunked_incrementally_without_gemini():
@@ -60,6 +61,54 @@ def test_mocked_gemini_extraction_preserves_evidence_and_processes_chunks():
     fact = layer.get_facts()[0]
     assert fact.evidence[0].document_name == "sample.txt"
     assert fact.evidence[0].excerpt == "Revenue increased to 100"
+
+
+def test_processing_reports_progress_and_reasoning_is_grounded_and_cached():
+    client = FakeClient(
+        {
+            "facts": [
+                {
+                    "text": "Revenue increased",
+                    "value": "100",
+                    "excerpt": "Revenue increased to 100",
+                    "page": 1,
+                }
+            ]
+        }
+    )
+    layer = FactLayer(client=client, chunk_size=1000)
+    progress = []
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
+        handle.write("Revenue increased")
+        handle.flush()
+        layer.process_document(handle.name, "sample.txt", progress_callback=lambda done, total: progress.append((done, total)))
+    assert progress == [(1, 1)]
+    layer.facts.append(
+        Fact(
+            id="second",
+            text="Revenue increased",
+            value="100",
+            evidence=[FactEvidence(document_name="second.txt", page=2, excerpt="Revenue increased to 100")],
+        )
+    )
+    layer._facts_version += 1
+    client.models.response_payload = {
+        "corroborations": [
+            {
+                "type": "corroboration",
+                "fact_1": "Revenue increased",
+                "fact_2": "Revenue increased",
+                "explanation": "Both sources support the same claim.",
+            }
+        ],
+        "contradictions": [],
+        "failures": [],
+    }
+    result = layer.run_reasoning()
+    assert result["corroborations"][0]["fact_1"]["evidence"][0]["document_name"] == "sample.txt"
+    calls_after_first_reasoning = client.models.calls
+    layer.run_reasoning()
+    assert client.models.calls == calls_after_first_reasoning
 
 
 def test_upload_returns_job_and_reaches_explicit_failure_without_key():
