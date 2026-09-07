@@ -1,6 +1,7 @@
 import tempfile
 import time
 import json
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -161,7 +162,7 @@ def test_health_exposes_provider_configuration_without_secret():
         response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()
-    assert {"status", "provider", "model", "configured", "sdk_available", "error"} <= set(payload)
+    assert {"status", "provider", "model", "base_url", "configured", "sdk_available", "error"} <= set(payload)
     assert "test-key" not in str(payload)
 
 
@@ -249,6 +250,41 @@ def test_quota_errors_are_structured_and_retry_after_is_concise():
         "retry_after_seconds": 17,
         "retryable": True,
     }
+
+
+def test_provider_errors_are_actionable_without_provider_payloads():
+    assert classify_provider_error(RuntimeError("401 invalid api key"), "openai_compatible")["code"] == "provider_auth"
+    assert classify_provider_error(RuntimeError("404 model not found"), "openai_compatible")["code"] == "provider_model"
+    assert classify_provider_error(RuntimeError("404 endpoint not found"), "openai_compatible")["code"] == "provider_endpoint"
+    assert classify_provider_error(RuntimeError("400 response_format json_object unsupported"), "openai_compatible")["code"] == "provider_structured_output"
+    assert classify_provider_error(TimeoutError("request timed out"), "openai_compatible")["code"] == "provider_timeout"
+
+
+def test_openai_compatible_retries_without_unsupported_structured_output():
+    class Completions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if "response_format" in kwargs:
+                raise RuntimeError("400 response_format json_object is not supported")
+            return type("Response", (), {"choices": [type("Choice", (), {"message": type("Message", (), {"content": '{"facts": []}'})()})()]})()
+
+    completions = Completions()
+    client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
+    layer = FactLayer(client=client)
+    layer.provider = "openai_compatible"
+    layer.model = "openai/gpt-oss-120b"
+    assert layer._extract_chunk("source text") == {"facts": []}
+    assert len(completions.calls) == 2
+    assert "response_format" not in completions.calls[1]
+
+
+def test_json_parser_accepts_fenced_json_but_not_non_objects():
+    assert FactLayer._parse_json("```json\n{\"facts\": []}\n```") == {"facts": []}
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        FactLayer._parse_json("not JSON")
 
 
 def test_quota_retry_honors_retry_after_without_raw_provider_blob(monkeypatch):

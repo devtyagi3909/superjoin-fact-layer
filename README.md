@@ -33,7 +33,7 @@ one of these examples:
 export LLM_PROVIDER=openai_compatible
 export LLM_API_KEY="gsk_..."
 export LLM_BASE_URL="https://api.groq.com/openai/v1"
-export LLM_MODEL="llama-3.1-8b-instant"
+export LLM_MODEL="openai/gpt-oss-120b"
 
 # OpenRouter (many free or low-cost models; availability and limits change)
 export LLM_PROVIDER=openai_compatible
@@ -51,6 +51,18 @@ OpenAI-compatible path.
 
 Open <http://localhost:8501>. The API is at <http://localhost:8000>; `/health`
 is safe to use as a readiness check and never returns the key.
+
+For Groq, `openai/gpt-oss-120b` is the recommended model when it is available
+on your account. Check the live model catalog before configuring it:
+
+```bash
+curl -sS --oauth2-bearer "$LLM_API_KEY" \
+  https://api.groq.com/openai/v1/models
+```
+
+`/provider-diagnostics` exposes the active provider, model, endpoint, and a
+safe configuration hint. Never put a key in a debug script or commit it; revoke
+and rotate any key that was previously exposed that way.
 
 ## Deterministic demo path
 
@@ -97,6 +109,7 @@ results** restores the most recent comparison without another provider call.
 | `POST /demo` | Load deterministic synthetic facts and four relationship cases without Gemini calls. |
 | `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
 | `GET /health` | Return readiness plus active provider, model, SDK availability, and configuration status (never credentials). |
+| `GET /provider-diagnostics` | Return safe provider configuration hints and model/endpoint metadata (never credentials). |
 
 Uploads are capped at 25 MB by default (`MAX_UPLOAD_BYTES` can override it).
 State is intentionally in memory for the assignment demo and is cleared on
