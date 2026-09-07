@@ -55,6 +55,8 @@ testable offline.
 The sidebar's **Load offline demo** button calls `POST /demo` and loads synthetic,
 clearly labeled facts for all four relationship cases without contacting Gemini.
 This is the recommended evaluator path when no provider quota is available.
+It also clears stale upload jobs and quota messages. **Use last successful
+results** restores the most recent comparison without another provider call.
 
 ## API contract
 
@@ -64,6 +66,9 @@ This is the recommended evaluator path when no provider quota is available.
 | `POST /uploads` | Queue repeated `files` parts for batch processing; returns `202` and a `jobs` array. |
 | `GET /upload/{job_id}` | Poll `queued`, `processing`, `success`, `partial`, or `failed`; includes progress, chunk counts, result, and error. |
 | `GET /facts` | Return extracted claims and source/page excerpts currently held in memory. |
+| `GET /graph` | Return fact nodes, relationship edges, status colors, and failure nodes. |
+| `GET /source-preview` | Return safe text/PDF page metadata and extracted preview text. |
+| `GET /source-file/{document_name}` | Stream a retained uploaded source for PDF preview. |
 | `POST /demo` | Load deterministic synthetic facts and four relationship cases without Gemini calls. |
 | `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
 | `GET /health` | Return service readiness and whether a Gemini client is configured. |
@@ -80,10 +85,14 @@ stable ID plus document, page, and verbatim excerpt. An inverted lexical index
 selects candidate pairs without an all-pairs explosion; Gemini then reasons
 only over those candidates. Provider quota errors are normalized to a short
 code/message/retry-after shape; only one short retry is attempted by default,
-and the UI never retries automatically. `api/main.py` owns validation and
+and a session-level cooldown blocks new uploads before another provider call.
+The offline demo explicitly resets that cooldown. `api/main.py` owns validation and
 asynchronous job state, while `ui/app.py` is a small evidence-first Streamlit review workspace
-with progress, empty/error states, search/filtering through the fact table, and
-expandable evidence.
+with progress, empty/error states, search/filtering through the fact table,
+expandable evidence, a self-contained SVG relationship graph, and side-by-side
+source grounding. PDFs are streamed from an API-owned temporary source registry;
+the UI displays cited page metadata and requests the cited page where browser
+PDF viewers support it, while retaining page navigation as the reliable fallback.
 
 The tradeoff is deliberate: lexical retrieval is transparent and dependency
 light, but synonyms can be missed. In-memory state is easy to review locally,

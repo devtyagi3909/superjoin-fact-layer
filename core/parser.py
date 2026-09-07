@@ -74,6 +74,14 @@ class ProviderQuotaError(RuntimeError):
         super().__init__(message)
 
 
+RELATIONSHIP_STYLES = {
+    "corroboration": {"label": "Corroboration", "color": "#16a34a"},
+    "genuine_contradiction": {"label": "Genuine contradiction", "color": "#dc2626"},
+    "explained_by_context": {"label": "Contextual reconciliation", "color": "#d97706"},
+    "extraction_failure": {"label": "Extraction failure", "color": "#6b7280"},
+}
+
+
 def _retry_after_seconds(error: Exception) -> int | None:
     text = str(error)
     candidates = re.findall(r"(?:retryDelay|retry.?after|retry in)[^0-9]{0,20}(\d+)", text, re.I)
@@ -152,6 +160,7 @@ class FactLayer:
         self._lock = threading.RLock()
         self._facts_version = 0
         self._reasoning_cache: tuple[int, dict] | None = None
+        self._quota_cooldown_until = 0.0
 
     @staticmethod
     def _build_client() -> Any:
@@ -219,6 +228,8 @@ class FactLayer:
     def _generate_content(self, prompt: str, schema: Any) -> Any:
         if self.client is None:
             raise RuntimeError("GEMINI_API_KEY is not configured")
+        if self.quota_cooldown_remaining() > 0:
+            raise ProviderQuotaError(round(self.quota_cooldown_remaining()))
         for attempt in range(self.max_retries + 1):
             try:
                 return self.client.models.generate_content(
@@ -233,12 +244,36 @@ class FactLayer:
                 details = classify_provider_error(exc)
                 if details["code"] != "provider_quota" or attempt >= self.max_retries:
                     if details["code"] == "provider_quota":
+                        self._set_quota_cooldown(details["retry_after_seconds"])
                         raise ProviderQuotaError(details["retry_after_seconds"]) from exc
                     raise
                 retry_after = details["retry_after_seconds"] or 2**attempt
                 if retry_after > self.max_retry_wait:
                     raise ProviderQuotaError(retry_after) from exc
                 time.sleep(min(retry_after, self.max_retry_wait))
+
+    def _set_quota_cooldown(self, retry_after_seconds: int | None) -> None:
+        if retry_after_seconds:
+            self._quota_cooldown_until = max(
+                self._quota_cooldown_until, time.time() + retry_after_seconds
+            )
+
+    def quota_cooldown_remaining(self) -> int:
+        return max(0, round(self._quota_cooldown_until - time.time()))
+
+    def quota_status(self) -> dict | None:
+        remaining = self.quota_cooldown_remaining()
+        if not remaining:
+            return None
+        return {
+            "code": "provider_quota",
+            "message": f"Gemini quota cooldown is active for about {remaining} seconds.",
+            "retry_after_seconds": remaining,
+            "retryable": True,
+        }
+
+    def reset_quota_cooldown(self) -> None:
+        self._quota_cooldown_until = 0.0
 
     def _extract_chunk(self, chunk: str) -> dict:
         prompt = f"""
@@ -339,9 +374,73 @@ Page markers are authoritative:
         ]
         with self._lock:
             self.facts = demo_facts
+            self.reset_quota_cooldown()
             self._facts_version += 1
             self._reasoning_cache = (self._facts_version, self._demo_reasoning())
         return self._reasoning_cache[1]
+
+    def build_graph(self, reasoning: dict | None = None) -> dict:
+        """Build renderer-neutral graph data from the evidence-first result."""
+        facts = self.get_facts()
+        nodes = [
+            {
+                "id": fact.id,
+                "label": fact.text,
+                "value": fact.value,
+                "evidence": [item.model_dump() for item in fact.evidence],
+                "kind": "fact",
+            }
+            for fact in facts
+        ]
+        node_ids = {node["id"] for node in nodes}
+        edges = []
+        result = reasoning if reasoning is not None else self.run_reasoning()
+        for group in ("corroborations", "contradictions"):
+            for index, relationship in enumerate(result.get(group, [])):
+                left = relationship.get("fact_1") or {}
+                right = relationship.get("fact_2") or {}
+                source = left.get("id")
+                target = right.get("id")
+                relation_type = relationship.get("type", "corroboration")
+                if source in node_ids and target in node_ids:
+                    edges.append(
+                        {
+                            "id": f"edge-{len(edges)}",
+                            "source": source,
+                            "target": target,
+                            "type": relation_type,
+                            "label": RELATIONSHIP_STYLES.get(
+                                relation_type, RELATIONSHIP_STYLES["extraction_failure"]
+                            )["label"],
+                            "color": RELATIONSHIP_STYLES.get(
+                                relation_type, RELATIONSHIP_STYLES["extraction_failure"]
+                            )["color"],
+                            "explanation": relationship.get("explanation", ""),
+                        }
+                    )
+        for index, failure in enumerate(result.get("failures", [])):
+            node_id = f"failure-{index}"
+            nodes.append(
+                {
+                    "id": node_id,
+                    "label": failure.get("description", "Extraction failure"),
+                    "value": None,
+                    "evidence": [],
+                    "kind": "failure",
+                }
+            )
+            edges.append(
+                {
+                    "id": f"edge-{len(edges)}",
+                    "source": node_id,
+                    "target": node_id,
+                    "type": "extraction_failure",
+                    "label": RELATIONSHIP_STYLES["extraction_failure"]["label"],
+                    "color": RELATIONSHIP_STYLES["extraction_failure"]["color"],
+                    "explanation": failure.get("description", ""),
+                }
+            )
+        return {"nodes": nodes, "edges": edges, "legend": RELATIONSHIP_STYLES, "demo": bool(result.get("demo"))}
 
     def _demo_reasoning(self) -> dict:
         facts = {fact.id: fact.model_dump() for fact in self.facts}

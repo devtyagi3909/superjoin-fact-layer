@@ -268,6 +268,35 @@ def test_demo_path_is_deterministic_and_marks_simulated_results():
     assert result["failures"][0]["type"] == "extraction_failure"
 
 
+def test_graph_data_contains_grounded_nodes_colored_relationships_and_failure_node():
+    layer = FactLayer(client=None)
+    reasoning = layer.load_demo()
+    graph = layer.build_graph(reasoning)
+    assert len(graph["nodes"]) == 6
+    assert {edge["type"] for edge in graph["edges"]} == {
+        "corroboration",
+        "genuine_contradiction",
+        "explained_by_context",
+        "extraction_failure",
+    }
+    assert graph["legend"]["genuine_contradiction"]["color"] == "#dc2626"
+    assert any(node["kind"] == "failure" for node in graph["nodes"])
+
+
+def test_source_preview_preserves_pdf_and_rejects_path_traversal():
+    with TestClient(app) as client:
+        response = client.post(
+            "/upload", files={"file": ("grounding.txt", b"Evidence on page one")}
+        )
+        assert response.status_code == 202
+        preview = client.get("/source-preview", params={"document_name": "grounding.txt"})
+        assert preview.status_code == 200
+        assert preview.json()["text"] == "Evidence on page one"
+        assert client.get(
+            "/source-preview", params={"document_name": "../grounding.txt"}
+        ).status_code == 404
+
+
 def test_api_failure_shape_does_not_expose_provider_blob(monkeypatch):
     def fail(*_args, **_kwargs):
         raise RuntimeError("429 RESOURCE_EXHAUSTED RetryInfo retryDelay: 12s internal token dump")
