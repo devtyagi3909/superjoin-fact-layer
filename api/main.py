@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 import uvicorn
 
-from core.parser import fact_layer
+from core.parser import classify_provider_error, fact_layer
 
 app = FastAPI(title="Fact Knowledge Layer API")
 _jobs: dict[str, dict] = {}
@@ -38,7 +38,13 @@ def _process_job(job_id: str, filepath: str, filename: str):
         result = fact_layer.process_document(filepath, filename, progress_callback=update_progress)
         _set_job(job_id, status=result["status"], result=result, error=None)
     except Exception as exc:
-        _set_job(job_id, status="failed", error=str(exc), result=None)
+        error = classify_provider_error(exc)
+        _set_job(
+            job_id,
+            status="failed",
+            error=error,
+            result={"status": "failed", "errors": [error], "quota": error if error["code"] == "provider_quota" else None},
+        )
     finally:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -114,6 +120,13 @@ async def get_upload_status(job_id: str):
 @app.get("/facts")
 async def get_facts():
     return {"facts": [fact.model_dump() for fact in fact_layer.get_facts()]}
+
+
+@app.post("/demo")
+async def load_demo():
+    """Load deterministic synthetic facts without calling Gemini."""
+    result = fact_layer.load_demo()
+    return {"status": "success", "demo": True, "result": result}
 
 
 @app.get("/health")

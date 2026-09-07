@@ -50,10 +50,22 @@ def render_job(job_id):
     if status == "success":
         st.success(f"Finished {job['filename']}.")
     elif status == "partial":
-        st.warning("Finished with chunk-level failures. The successful evidence remains available.")
+        quota = (job.get("result") or {}).get("quota")
+        if quota:
+            st.warning(quota.get("message", "Gemini quota limited part of this upload."))
+            st.caption("Successful evidence remains available. Upload again later to retry failed chunks.")
+        else:
+            st.warning("Finished with chunk-level failures. The successful evidence remains available.")
     elif status == "failed":
         errors = (job.get("result") or {}).get("errors") or []
-        st.error(job.get("error") or (errors[0] if errors else "Processing failed."))
+        error = job.get("error") or (errors[0] if errors else None)
+        if isinstance(error, dict) and error.get("code") == "provider_quota":
+            st.error(error.get("message", "Gemini quota is temporarily exhausted."))
+            st.caption("No automatic retry was started. Wait for the stated window, then upload again.")
+        elif isinstance(error, dict):
+            st.error(error.get("message", "Processing failed."))
+        else:
+            st.error(error or "Processing failed.")
 
 
 def evidence_block(fact):
@@ -113,10 +125,18 @@ with st.sidebar:
             st.session_state["job_ids"] = [job["job_id"] for job in response.json()["jobs"]]
         except requests.RequestException as exc:
             st.error(f"Upload failed: {exc}")
+    if st.button("Load offline demo", use_container_width=True):
+        try:
+            response = requests.post(f"{API_URL}/demo", timeout=10)
+            response.raise_for_status()
+            st.session_state["reasoning"] = response.json()["result"]
+            st.success("Loaded synthetic demo data; no Gemini calls were made.")
+        except requests.RequestException as exc:
+            st.error(f"Demo load failed: {exc}")
     for job_id in st.session_state.get("job_ids", []):
         render_job(job_id)
     st.markdown("---")
-    st.caption("The API uses bounded PDF chunks and parallel extraction workers. No credentials are stored in the UI.")
+    st.caption("PDF calls are bounded for free-tier safety. Quota failures are concise and never retried automatically.")
 
 facts = []
 try:

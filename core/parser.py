@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import threading
 import uuid
 from collections import Counter, defaultdict
@@ -62,6 +63,73 @@ class ReasoningOutput(BaseModel):
     failures: list[Failure] = []
 
 
+class ProviderQuotaError(RuntimeError):
+    """A concise, safe representation of a provider quota/rate-limit failure."""
+
+    def __init__(self, retry_after_seconds: int | None = None):
+        self.retry_after_seconds = retry_after_seconds
+        message = "Gemini quota is temporarily exhausted."
+        if retry_after_seconds:
+            message += f" Retry after about {retry_after_seconds} seconds."
+        super().__init__(message)
+
+
+def _retry_after_seconds(error: Exception) -> int | None:
+    text = str(error)
+    candidates = re.findall(r"(?:retryDelay|retry.?after|retry in)[^0-9]{0,20}(\d+)", text, re.I)
+    for candidate in candidates:
+        return max(1, int(candidate))
+    def find_retry(value: Any) -> int | None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if "retry" in str(key).lower() and item is not None:
+                    match = re.search(r"\d+", str(item))
+                    if match:
+                        return max(1, int(match.group()))
+                found = find_retry(item)
+                if found:
+                    return found
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                found = find_retry(item)
+                if found:
+                    return found
+        return None
+    for value in (getattr(error, "details", None), getattr(error, "response", None), getattr(error, "body", None)):
+        found = find_retry(value)
+        if found:
+            return found
+    for value in (getattr(error, "retry_after", None), getattr(error, "retry_after_seconds", None)):
+        if value is not None:
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def classify_provider_error(error: Exception) -> dict:
+    """Return a stable API/UI error without exposing provider payloads."""
+    text = str(error).lower()
+    if "429" in text or "resource_exhausted" in text or "quota" in text or "rate limit" in text:
+        retry_after = _retry_after_seconds(error)
+        message = "Gemini quota is temporarily exhausted. Please wait and retry the upload."
+        if retry_after:
+            message = f"Gemini quota is temporarily exhausted. Retry after about {retry_after} seconds."
+        return {
+            "code": "provider_quota",
+            "message": message,
+            "retry_after_seconds": retry_after,
+            "retryable": True,
+        }
+    return {
+        "code": "extraction_error",
+        "message": "The document could not be processed. Check the file and try again.",
+        "retry_after_seconds": None,
+        "retryable": False,
+    }
+
+
 class FactLayer:
     """Incremental document extraction with bounded, lexical candidate retrieval."""
 
@@ -75,7 +143,10 @@ class FactLayer:
         self.facts: List[Fact] = []
         self.client = client if client is not None else self._build_client()
         self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "4"))
+        self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "2"))
+        self.max_chunks = int(os.getenv("GEMINI_MAX_CHUNKS", "8"))
+        self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
+        self.max_retry_wait = int(os.getenv("GEMINI_MAX_RETRY_WAIT_SECONDS", "8"))
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._lock = threading.RLock()
@@ -136,9 +207,40 @@ class FactLayer:
 
         yield from self._chunk_pages(text_pages())
 
-    def _extract_chunk(self, chunk: str) -> dict:
+    def _bounded_chunks(self, chunks: list[str]) -> list[str]:
+        if self.max_chunks <= 0 or len(chunks) <= self.max_chunks:
+            return chunks
+        # Group adjacent chunks instead of dropping pages or evidence.
+        groups = [[] for _ in range(self.max_chunks)]
+        for index, chunk in enumerate(chunks):
+            groups[index * self.max_chunks // len(chunks)].append(chunk)
+        return ["\n".join(group) for group in groups if group]
+
+    def _generate_content(self, prompt: str, schema: Any) -> Any:
         if self.client is None:
             raise RuntimeError("GEMINI_API_KEY is not configured")
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                    ),
+                )
+            except Exception as exc:
+                details = classify_provider_error(exc)
+                if details["code"] != "provider_quota" or attempt >= self.max_retries:
+                    if details["code"] == "provider_quota":
+                        raise ProviderQuotaError(details["retry_after_seconds"]) from exc
+                    raise
+                retry_after = details["retry_after_seconds"] or 2**attempt
+                if retry_after > self.max_retry_wait:
+                    raise ProviderQuotaError(retry_after) from exc
+                time.sleep(min(retry_after, self.max_retry_wait))
+
+    def _extract_chunk(self, chunk: str) -> dict:
         prompt = f"""
 Extract key factual claims from this document chunk. Return only claims supported by
 the text. For every claim provide a concise "text", a numerical or categorical
@@ -146,20 +248,13 @@ the text. For every claim provide a concise "text", a numerical or categorical
 Page markers are authoritative:
 {chunk}
 """
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=FactList,
-            ),
-        )
+        response = self._generate_content(prompt, FactList)
         return json.loads(response.text)
 
     def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
         extracted = 0
-        chunks = list(self.iter_text_chunks(filepath, filename))
+        chunks = self._bounded_chunks(list(self.iter_text_chunks(filepath, filename)))
         total_chunks = len(chunks)
         if not chunks:
             return {
@@ -191,7 +286,7 @@ Page markers are authoritative:
                     )
                 return index, new_facts, None
             except Exception as exc:
-                return index, [], str(exc)
+                return index, [], classify_provider_error(exc)
 
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
             futures = [executor.submit(extract, item) for item in enumerate(chunks)]
@@ -217,11 +312,48 @@ Page markers are authoritative:
             "message": f"Processed {filename}",
             "facts_extracted": extracted,
             "errors": errors,
+            "quota": next((error for error in errors if isinstance(error, dict) and error["code"] == "provider_quota"), None),
         }
 
     def get_facts(self) -> List[Fact]:
         with self._lock:
             return list(self.facts)
+
+    def load_demo(self) -> dict:
+        """Load deterministic, clearly synthetic facts for credential-free demos."""
+        cases = [
+            ("corroboration-a", "Service handled requests", "1200", "Operations report confirms 1200 requests."),
+            ("corroboration-b", "Service handled requests", "1200", "Independent review confirms 1200 requests."),
+            ("genuine_contradiction", "Service handled requests", "900", "Audit reports 900 requests in the same period."),
+            ("explained_by_context", "Service handled requests", "1200", "The 1200 figure covers the full year; the other covers Q1."),
+            ("extraction_failure", "Unclear claim", None, "The source is too ambiguous to classify safely."),
+        ]
+        demo_facts = [
+            Fact(
+                id=f"demo-{index}",
+                text=text,
+                value=value,
+                evidence=[FactEvidence(document_name=f"demo-{kind}.txt", page=1, excerpt=excerpt)],
+            )
+            for index, (kind, text, value, excerpt) in enumerate(cases)
+        ]
+        with self._lock:
+            self.facts = demo_facts
+            self._facts_version += 1
+            self._reasoning_cache = (self._facts_version, self._demo_reasoning())
+        return self._reasoning_cache[1]
+
+    def _demo_reasoning(self) -> dict:
+        facts = {fact.id: fact.model_dump() for fact in self.facts}
+        return {
+            "demo": True,
+            "corroborations": [{"type": "corroboration", "fact_1": facts["demo-0"], "fact_2": facts["demo-1"], "explanation": "Synthetic independent sources agree."}],
+            "contradictions": [
+                {"type": "genuine_contradiction", "fact_1": facts["demo-0"], "fact_2": facts["demo-2"], "explanation": "Synthetic same-scope values differ."},
+                {"type": "explained_by_context", "fact_1": facts["demo-0"], "fact_2": facts["demo-3"], "explanation": "Synthetic sources use different reporting periods."},
+            ],
+            "failures": [{"type": "extraction_failure", "description": "Synthetic ambiguous source; no fact was fabricated."}],
+        }
 
     @staticmethod
     def _tokens(text: str) -> set[str]:
@@ -303,23 +435,17 @@ Candidate pairs:
 {json.dumps(candidates, indent=2)}
 """
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ReasoningOutput,
-                ),
-            )
+            response = self._generate_content(prompt, ReasoningOutput)
             result = self._ground_relationships(json.loads(response.text), facts)
             with self._lock:
                 self._reasoning_cache = (self._facts_version, result)
             return result
         except Exception as exc:
+            error = classify_provider_error(exc)
             return {
                 "corroborations": [],
                 "contradictions": [],
-                "failures": [{"type": "reasoning_failure", "description": str(exc)}],
+                "failures": [{"type": "reasoning_failure", "description": error["message"], "error": error}],
             }
 
 
