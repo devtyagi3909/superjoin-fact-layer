@@ -91,8 +91,9 @@ def render_job(job_id):
     status = job["status"]
     st.progress(job.get("progress", 0) / 100, text=f"{status.title()} - {job.get('progress', 0)}%")
     st.caption(
-        f"{job.get('provider_calls_completed', job.get('chunks_completed', 0))}/"
-        f"{job.get('provider_calls_total', job.get('chunks_total')) or '?'} provider calls completed "
+        f"{(job.get('result') or {}).get('provider_calls_succeeded', job.get('provider_calls_completed', 0))}/"
+        f"{(job.get('result') or {}).get('provider_calls_total', job.get('provider_calls_total', job.get('chunks_total'))) or '?'} provider calls succeeded"
+        f"  | {(job.get('result') or {}).get('provider_calls_failed', 0)} failed"
         f"  |  job {job_id}"
     )
     if status == "success":
@@ -109,13 +110,24 @@ def render_job(job_id):
                 call = error.get("provider_call", error.get("chunk"))
                 total = error.get("provider_calls_total", error.get("chunks_total"))
                 location = f" (provider call {call}/{total})" if call and total else ""
-                st.caption(f"{error.get('message', 'Provider call failed.')}{location}")
+                if error.get("code") == "provider_request_too_large":
+                    st.error(
+                        "Groq rejected this request because the extracted chunk was too large. "
+                        "No facts were fabricated. Use offline demo or lower LLM_MAX_INPUT_CHARS."
+                    )
+                else:
+                    st.caption(f"{error.get('message', 'Provider call failed.')}{location}")
     elif status == "failed":
         errors = (job.get("result") or {}).get("errors") or []
         error = job.get("error") or (errors[0] if errors else None)
         if isinstance(error, dict) and error.get("code") == "provider_quota":
             st.error(error.get("message", "Gemini quota is temporarily exhausted."))
             st.caption("No automatic retry was started. Use offline demo or your last successful results.")
+        elif isinstance(error, dict) and error.get("code") == "provider_request_too_large":
+            st.error(
+                "Groq rejected this request because the extracted chunk was too large. "
+                "No facts were fabricated. Use offline demo or lower LLM_MAX_INPUT_CHARS."
+            )
         elif isinstance(error, dict):
             chunk = error.get("chunk")
             location = (

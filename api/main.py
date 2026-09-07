@@ -64,7 +64,14 @@ def _process_job(job_id: str, filepath: str, filename: str):
             job_id,
             status="failed",
             error=error,
-            result={"status": "failed", "errors": [error], "quota": error if error["code"] == "provider_quota" else None},
+            result={
+                "status": "failed",
+                "errors": [error],
+                "provider_calls_total": None,
+                "provider_calls_succeeded": 0,
+                "provider_calls_failed": 1,
+                "quota": error if error["code"] == "provider_quota" else None,
+            },
         )
 
 
@@ -237,6 +244,10 @@ async def provider_diagnostics():
             if provider["provider"] == "openai_compatible"
             else None
         ),
+        "effective_max_input_chars": fact_layer.max_input_chars,
+        "max_chunks": fact_layer.max_chunks,
+        "max_workers": fact_layer.max_workers,
+        "model": fact_layer.model,
     }
 
 

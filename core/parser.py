@@ -81,6 +81,10 @@ class ProviderQuotaError(RuntimeError):
         super().__init__(message)
 
 
+class ProviderRequestTooLargeError(RuntimeError):
+    """A request exceeded the configured provider input budget."""
+
+
 def _provider_label(provider: str) -> str:
     return "Gemini" if provider == "gemini" else "OpenAI-compatible provider"
 
@@ -131,6 +135,30 @@ def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
     """Return a stable API/UI error without exposing provider payloads."""
     text = str(error).lower()
     status_code = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
+    if (
+        status_code == 413
+        or "413" in text
+        or any(
+            term in text
+            for term in (
+                "request too large",
+                "payload too large",
+                "context length",
+                "input is too long",
+                "too many tokens",
+                "provider request budget",
+            )
+        )
+    ):
+        return {
+            "code": "provider_request_too_large",
+            "message": (
+                "The provider rejected this request because the extracted chunk was too large. "
+                "No facts were fabricated. Use offline demo or lower LLM_MAX_INPUT_CHARS."
+            ),
+            "retry_after_seconds": None,
+            "retryable": False,
+        }
     if "429" in text or "resource_exhausted" in text or "quota" in text or "rate limit" in text:
         retry_after = _retry_after_seconds(error)
         provider_name = "Gemini" if provider == "gemini" else "LLM provider"
@@ -190,6 +218,9 @@ class FactLayer:
         )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        # This is the complete prompt budget, including extraction instructions.
+        # 20,000 chars is conservative for Groq free-tier context/request limits.
+        self.max_input_chars = self._safe_int("LLM_MAX_INPUT_CHARS", None, 20000, 1000)
         self._lock = threading.RLock()
         self._facts_version = 0
         self._reasoning_cache: tuple[int, dict] | None = None
@@ -255,6 +286,8 @@ class FactLayer:
             "error": error,
             "max_chunks": self.max_chunks,
             "max_workers": self.max_workers,
+            "max_input_chars": self.max_input_chars,
+            "effective_max_input_chars": self.max_input_chars,
             "max_retries": self.max_retries,
             "max_retry_wait_seconds": self.max_retry_wait,
             "config_warnings": list(self.config_warnings),
@@ -323,6 +356,61 @@ class FactLayer:
         for index, chunk in enumerate(chunks):
             groups[index * self.max_chunks // len(chunks)].append(chunk)
         return ["\n".join(group) for group in groups if group]
+
+    @staticmethod
+    def _extraction_prompt_prefix() -> str:
+        return """
+Extract key factual claims from this document chunk. Return only claims supported by
+the text. For every claim provide a concise "text", a numerical or categorical
+"value" when present, a verbatim supporting "excerpt", and the source "page".
+Return one JSON object only, with a top-level "facts" array. Do not use markdown,
+code fences, commentary, or any text outside the JSON object.
+Page markers are authoritative:
+"""
+
+    def _provider_input_budget(self) -> int:
+        suffix_length = len("\n")
+        return max(1, self.max_input_chars - len(self._extraction_prompt_prefix()) - suffix_length)
+
+    def _prepare_provider_chunks(self, source_chunks: list[str]) -> list[str]:
+        """Split oversized source chunks, then group adjacent text without dropping it."""
+        budget = self._provider_input_budget()
+        atomic: list[str] = []
+        overlap = min(self.chunk_overlap, max(0, budget // 10))
+        for source_chunk in source_chunks:
+            if len(source_chunk) <= budget:
+                atomic.append(source_chunk)
+                continue
+            start = 0
+            while start < len(source_chunk):
+                end = min(len(source_chunk), start + budget)
+                atomic.append(source_chunk[start:end])
+                if end == len(source_chunk):
+                    break
+                start = max(start + 1, end - overlap)
+
+        if len(atomic) <= self.max_chunks:
+            return atomic
+
+        groups: list[str] = []
+        current = ""
+        for chunk in atomic:
+            candidate = f"{current}\n{chunk}" if current else chunk
+            if current and len(candidate) > budget:
+                groups.append(current)
+                current = chunk
+            else:
+                current = candidate
+        if current:
+            groups.append(current)
+
+        if len(groups) > self.max_chunks:
+            required = len(groups)
+            raise ProviderRequestTooLargeError(
+                f"Document requires {required} provider calls at the configured "
+                f"LLM_MAX_INPUT_CHARS budget, exceeding GEMINI_MAX_CHUNKS={self.max_chunks}."
+            )
+        return groups
 
     def _generate_content(self, prompt: str, schema: Any) -> Any:
         if self.client is None:
@@ -395,15 +483,7 @@ class FactLayer:
         self._quota_cooldown_until = 0.0
 
     def _extract_chunk(self, chunk: str) -> dict:
-        prompt = f"""
-Extract key factual claims from this document chunk. Return only claims supported by
-the text. For every claim provide a concise "text", a numerical or categorical
-"value" when present, a verbatim supporting "excerpt", and the source "page".
-Return one JSON object only, with a top-level "facts" array. Do not use markdown,
-code fences, commentary, or any text outside the JSON object.
-Page markers are authoritative:
-{chunk}
-"""
+        prompt = f"{self._extraction_prompt_prefix()}\n{chunk}\n"
         response = self._generate_content(prompt, FactList)
         try:
             return self._parse_json(response.text)
@@ -462,10 +542,9 @@ Page markers are authoritative:
 
     def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
+        successful_calls = 0
         extracted = 0
         source_chunks = list(self.iter_text_chunks(filepath, filename))
-        chunks = self._bounded_chunks(source_chunks)
-        total_chunks = len(chunks)
         if not source_chunks:
             return {
                 "status": "failed",
@@ -473,6 +552,24 @@ Page markers are authoritative:
                 "facts_extracted": 0,
                 "errors": ["No extractable text found"],
             }
+        try:
+            chunks = self._prepare_provider_chunks(source_chunks)
+        except Exception as exc:
+            error = self._error_with_context(exc, chunk_index=0, chunk_total=0)
+            return {
+                "status": "failed",
+                "message": f"Unable to fit {filename} within the provider request budget.",
+                "facts_extracted": 0,
+                "errors": [error],
+                "chunks_total": 0,
+                "source_chunks_total": len(source_chunks),
+                "provider_calls_total": 0,
+                "provider_calls_succeeded": 0,
+                "provider_calls_failed": 0,
+                "failed_provider_calls": [],
+                "quota": None,
+            }
+        total_chunks = len(chunks)
 
         def extract(index_and_chunk):
             index, chunk = index_and_chunk
@@ -511,6 +608,8 @@ Page markers are authoritative:
                 extracted += len(new_facts)
                 if error:
                     errors.append(error)
+                else:
+                    successful_calls += 1
                 if progress_callback:
                     progress_callback(completed, total_chunks)
         if not extracted and errors:
@@ -526,6 +625,14 @@ Page markers are authoritative:
             "errors": errors,
             "chunks_total": total_chunks,
             "source_chunks_total": len(source_chunks),
+            "provider_calls_total": total_chunks,
+            "provider_calls_succeeded": successful_calls,
+            "provider_calls_failed": len(errors),
+            "failed_provider_calls": [
+                error.get("provider_call")
+                for error in errors
+                if isinstance(error, dict) and error.get("provider_call") is not None
+            ],
             "quota": next((error for error in errors if isinstance(error, dict) and error["code"] == "provider_quota"), None),
         }
 
