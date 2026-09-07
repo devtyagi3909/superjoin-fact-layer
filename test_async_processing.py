@@ -1,6 +1,7 @@
 import tempfile
 import time
 import json
+from pathlib import Path
 import pytest
 
 from fastapi.testclient import TestClient
@@ -363,3 +364,47 @@ def test_api_failure_shape_does_not_expose_provider_blob(monkeypatch):
     assert status["error"]["code"] == "provider_quota"
     assert status["error"]["retry_after_seconds"] == 12
     assert "internal token dump" not in str(status)
+
+
+def test_failed_chunk_reports_safe_provider_context_and_progress():
+    class FailingModels:
+        def generate_content(self, **_kwargs):
+            raise RuntimeError("401 invalid api key")
+
+    layer = FactLayer(
+        client=type("Client", (), {"models": FailingModels()})(),
+        chunk_size=10,
+        chunk_overlap=0,
+        max_workers=1,
+    )
+    progress = []
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
+        handle.write("one two three four five six")
+        handle.flush()
+        result = layer.process_document(
+            handle.name,
+            "sample.txt",
+            progress_callback=lambda done, total: progress.append((done, total)),
+        )
+    assert result["status"] == "failed"
+    assert progress == [(index, len(progress)) for index in range(1, len(progress) + 1)]
+    assert result["errors"][0] == {
+        "code": "provider_auth",
+        "message": "Gemini authentication failed. Check the configured API key.",
+        "retry_after_seconds": None,
+        "retryable": False,
+        "provider": "gemini",
+        "model": layer.model,
+        "status": 401,
+        "chunk": 1,
+        "chunks_total": len(progress),
+    }
+
+
+def test_ui_css_forces_light_main_and_dark_sidebar_text():
+    css = Path("ui/app.py").read_text(encoding="utf-8")
+    assert "color-scheme: light" in css
+    assert "[data-testid=\"stMain\"]" in css
+    assert "color: #111827 !important" in css
+    assert "[data-testid=\"stSidebar\"] { background: #101827" in css
+    assert "prefers-color-scheme" not in css

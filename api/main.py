@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -44,6 +45,19 @@ def _process_job(job_id: str, filepath: str, filename: str):
         _set_job(job_id, status=result["status"], result=result, error=None)
     except Exception as exc:
         error = classify_provider_error(exc)
+        status = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        if not status:
+            match = re.search(r"\b([45]\d{2})\b", str(exc))
+            status = int(match.group(1)) if match else None
+        error.update(
+            {
+                "provider": fact_layer.provider,
+                "model": fact_layer.model,
+                "status": status or "unknown",
+            }
+        )
         _set_job(
             job_id,
             status="failed",
@@ -196,7 +210,13 @@ async def load_demo():
 @app.get("/health")
 async def health():
     provider = fact_layer.provider_status()
-    return {"status": "ok", "gemini_configured": provider["provider"] == "gemini" and provider["configured"], **provider}
+    return {
+        "status": "ok",
+        "gemini_configured": provider["provider"] == "gemini" and provider["configured"],
+        "max_chunks": fact_layer.max_chunks,
+        "max_retries": fact_layer.max_retries,
+        **provider,
+    }
 
 
 @app.get("/provider-diagnostics")
