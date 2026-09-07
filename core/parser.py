@@ -7,6 +7,7 @@ import threading
 import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, List, Optional
 
 import fitz  # PyMuPDF
@@ -30,8 +31,20 @@ class FactEvidence(BaseModel):
 class Fact(BaseModel):
     id: str
     text: str
-    value: Optional[str]
+    value: Optional[str] = None
     evidence: List[FactEvidence]
+    subject: Optional[str] = None
+    predicate: Optional[str] = None
+    raw_value: Optional[str] = None
+    normalized_value: Optional[str] = None
+    normalized_unit: Optional[str] = None
+    time_expression: Optional[str] = None
+    time_start: Optional[str] = None
+    time_end: Optional[str] = None
+    scope_expression: Optional[str] = None
+    polarity: Optional[str] = None
+    confidence: Optional[float] = None
+    confidence_breakdown: Optional[dict[str, float]] = None
 
 
 class FactOutput(BaseModel):
@@ -39,6 +52,18 @@ class FactOutput(BaseModel):
     value: Optional[str] = None
     excerpt: str
     page: Optional[int] = None
+    subject: Optional[str] = None
+    predicate: Optional[str] = None
+    raw_value: Optional[str] = None
+    normalized_value: Optional[str] = None
+    normalized_unit: Optional[str] = None
+    time_expression: Optional[str] = None
+    time_start: Optional[str] = None
+    time_end: Optional[str] = None
+    scope_expression: Optional[str] = None
+    polarity: Optional[str] = None
+    confidence: Optional[float] = None
+    confidence_breakdown: Optional[dict[str, float]] = None
 
 
 class FactList(BaseModel):
@@ -95,6 +120,86 @@ RELATIONSHIP_STYLES = {
     "explained_by_context": {"label": "Contextual reconciliation", "color": "#d97706"},
     "extraction_failure": {"label": "Extraction failure", "color": "#6b7280"},
 }
+
+
+def _normalise_number(value: Any) -> str | None:
+    if value is None:
+        return None
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(value))
+    if not match:
+        return None
+    try:
+        return format(Decimal(match.group().replace(",", "")), "f").rstrip("0").rstrip(".") or "0"
+    except InvalidOperation:
+        return None
+
+
+def _normalise_unit(value: Any, text: str = "") -> str | None:
+    source = f"{value or ''} {text}".lower()
+    match = re.search(r"\b(percent|%|seconds?|minutes?|hours?|days?|weeks?|months?|years?|kg|g|mg|km|m|cm|usd|eur|gb|mb)\b", source)
+    if not match:
+        return None
+    unit = match.group(1)
+    return "%" if unit == "percent" else unit.rstrip("s")
+
+
+def _token_overlap(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    left_tokens = FactLayer._tokens(left)
+    right_tokens = FactLayer._tokens(right)
+    return bool(left_tokens and right_tokens and (left_tokens & right_tokens))
+
+
+def _metadata_for_claim(item: dict, text: str, value: Any) -> dict:
+    raw_value = item.get("raw_value") or value
+    normalized_value = item.get("normalized_value") or _normalise_number(raw_value)
+    return {
+        "subject": item.get("subject"),
+        "predicate": item.get("predicate"),
+        "raw_value": raw_value,
+        "normalized_value": normalized_value,
+        "normalized_unit": item.get("normalized_unit") or _normalise_unit(raw_value, text),
+        "time_expression": item.get("time_expression"),
+        "time_start": item.get("time_start"),
+        "time_end": item.get("time_end"),
+        "scope_expression": item.get("scope_expression"),
+        "polarity": item.get("polarity"),
+        "confidence": item.get("confidence"),
+        "confidence_breakdown": item.get("confidence_breakdown"),
+    }
+
+
+def _evidence_failure(item: dict, chunk: str) -> str | None:
+    excerpt = str(item.get("excerpt") or "").strip()
+    if not excerpt:
+        return "Evidence excerpt is missing."
+    # Older providers only returned the original four fields. Keep that
+    # response contract usable while applying strict admission to enriched
+    # claims and all malformed excerpts.
+    enriched = any(
+        key in item
+        for key in (
+            "subject", "predicate", "normalized_value", "normalized_unit",
+            "time_expression", "time_start", "time_end", "scope_expression",
+            "confidence_breakdown",
+        )
+    )
+    if not enriched:
+        return None
+    if excerpt not in chunk:
+        return "Evidence excerpt is not present in the source chunk."
+    page = item.get("page")
+    if page is None:
+        return "Evidence page is missing."
+    markers = re.findall(r"---\s*Page\s+(\d+)\s*---", chunk, flags=re.I)
+    if not markers or str(page) not in markers:
+        return f"Evidence page {page} does not match a source page marker."
+    value = item.get("value") or item.get("raw_value")
+    number = _normalise_number(value)
+    if number is not None and not re.search(rf"(?<![\d.]){re.escape(number)}(?![\d.])|{re.escape(number).replace('.', r'[.,]')}", excerpt.replace(",", "")):
+        return f"Numeric value {value!r} is not present in the evidence excerpt."
+    return None
 
 
 def _retry_after_seconds(error: Exception) -> int | None:
@@ -205,6 +310,7 @@ class FactLayer:
         max_workers: Optional[int] = None,
     ):
         self.facts: List[Fact] = []
+        self.extraction_failures: list[dict] = []
         self.provider = os.getenv("LLM_PROVIDER", "gemini" if os.getenv("GEMINI_API_KEY") else "openai_compatible" if os.getenv("LLM_API_KEY") else "gemini").lower()
         self.model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
@@ -363,6 +469,11 @@ class FactLayer:
 Extract key factual claims from this document chunk. Return only claims supported by
 the text. For every claim provide a concise "text", a numerical or categorical
 "value" when present, a verbatim supporting "excerpt", and the source "page".
+When possible also provide normalized metadata: subject, predicate, raw_value,
+normalized_value, normalized_unit, time_expression/time_start/time_end,
+scope_expression, polarity, confidence, and confidence_breakdown. The breakdown
+must use explainable components named evidence_match, scope_completeness,
+comparison_strength, and extraction_quality, not an opaque score.
 Return one JSON object only, with a top-level "facts" array. Do not use markdown,
 code fences, commentary, or any text outside the JSON object.
 Page markers are authoritative:
@@ -542,6 +653,7 @@ Page markers are authoritative:
 
     def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
+        extraction_failures = []
         successful_calls = 0
         extracted = 0
         source_chunks = list(self.iter_text_chunks(filepath, filename))
@@ -577,11 +689,25 @@ Page markers are authoritative:
                 data = self._extract_chunk(chunk)
                 new_facts = []
                 for item in data.get("facts", []):
+                    failure = _evidence_failure(item, chunk)
+                    if failure:
+                        extraction_failures.append(
+                            {
+                                "type": "extraction_failure",
+                                "description": failure,
+                                "document_name": filename,
+                                "page": item.get("page"),
+                                "claim": item.get("text"),
+                            }
+                        )
+                        continue
+                    text = str(item.get("text") or "").strip()
+                    value = item.get("value")
                     new_facts.append(
                         Fact(
                             id=str(uuid.uuid4()),
-                            text=item.get("text", ""),
-                            value=item.get("value"),
+                            text=text,
+                            value=value,
                             evidence=[
                                 FactEvidence(
                                     document_name=filename,
@@ -589,6 +715,7 @@ Page markers are authoritative:
                                     excerpt=item.get("excerpt", ""),
                                 )
                             ],
+                            **_metadata_for_claim(item, text, value),
                         )
                     )
                 return index, new_facts, None
@@ -612,9 +739,11 @@ Page markers are authoritative:
                     successful_calls += 1
                 if progress_callback:
                     progress_callback(completed, total_chunks)
-        if not extracted and errors:
+        with self._lock:
+            self.extraction_failures.extend(extraction_failures)
+        if not extracted and (errors or extraction_failures):
             status = "failed"
-        elif errors:
+        elif errors or extraction_failures:
             status = "partial"
         else:
             status = "success"
@@ -623,6 +752,7 @@ Page markers are authoritative:
             "message": f"Processed {filename}",
             "facts_extracted": extracted,
             "errors": errors,
+            "extraction_failures": extraction_failures,
             "chunks_total": total_chunks,
             "source_chunks_total": len(source_chunks),
             "provider_calls_total": total_chunks,
@@ -749,7 +879,10 @@ Page markers are authoritative:
         index: dict[str, set[int]] = defaultdict(set)
         tokens = []
         for i, fact in enumerate(facts):
-            fact_tokens = FactLayer._tokens(f"{fact.text} {fact.value or ''}")
+            fact_tokens = FactLayer._tokens(
+                f"{fact.text} {fact.value or ''} {fact.subject or ''} "
+                f"{fact.predicate or ''} {fact.normalized_value or ''}"
+            )
             tokens.append(fact_tokens)
             for token in fact_tokens:
                 index[token].add(i)
@@ -759,6 +892,46 @@ Page markers are authoritative:
             for j, _ in candidates.most_common(top_k):
                 pairs.add(tuple(sorted((i, j))))
         return [(facts[i], facts[j]) for i, j in pairs]
+
+    @staticmethod
+    def _relationship_gate(left: Fact, right: Fact) -> dict | None:
+        if left.subject is None and right.subject is None and left.predicate is None and right.predicate is None:
+            return {"type": "ambiguous", "metadata": {"gate": "legacy_fields", "llm_required": True}}
+        if not (_token_overlap(left.subject, right.subject) and _token_overlap(left.predicate, right.predicate)):
+            return None
+        left_unit = left.normalized_unit
+        right_unit = right.normalized_unit
+        if left_unit and right_unit and left_unit != right_unit:
+            return {
+                "type": "explained_by_context",
+                "explanation": f"Claims use incompatible normalized units ({left_unit} vs {right_unit}).",
+                "metadata": {"gate": "unit_mismatch", "llm_required": False},
+            }
+        left_period = (left.time_start, left.time_end, left.time_expression)
+        right_period = (right.time_start, right.time_end, right.time_expression)
+        if left_period[0] and right_period[0] and left_period[0] != right_period[0]:
+            return {
+                "type": "explained_by_context",
+                "explanation": "Claims refer to disjoint or different reported periods.",
+                "metadata": {"gate": "time_context", "llm_required": False},
+            }
+        if left.scope_expression and right.scope_expression and left.scope_expression.strip().lower() != right.scope_expression.strip().lower():
+            return {
+                "type": "explained_by_context",
+                "explanation": "Claims use different explicit scopes.",
+                "metadata": {"gate": "scope_context", "llm_required": False},
+            }
+        if (
+            left.normalized_value is not None
+            and left.normalized_value == right.normalized_value
+            and (not left_unit or not right_unit or left_unit == right_unit)
+        ):
+            return {
+                "type": "corroboration",
+                "explanation": "Independent documents report the same normalized value in the same scope.",
+                "metadata": {"gate": "exact_normalized_match", "llm_required": False},
+            }
+        return {"type": "ambiguous", "metadata": {"gate": "llm_required", "llm_required": True}}
 
     @staticmethod
     def _ground_relationships(result: dict, facts: List[Fact]) -> dict:
@@ -792,16 +965,30 @@ Page markers are authoritative:
             return {"corroborations": [], "contradictions": [], "failures": []}
         pairs = self.retrieve_related_facts(facts)
         if not pairs:
-            return {"corroborations": [], "contradictions": [], "failures": []}
-        candidates = [
-            {"fact_1": left.model_dump(), "fact_2": right.model_dump()}
-            for left, right in pairs
-        ]
+            return {"corroborations": [], "contradictions": [], "failures": list(self.extraction_failures)}
+        gated = []
+        candidates = []
+        deterministic = {"corroborations": [], "contradictions": []}
+        for left, right in pairs:
+            gate = self._relationship_gate(left, right)
+            if gate is None:
+                continue
+            relationship = {
+                **gate,
+                "fact_1": left.model_dump(),
+                "fact_2": right.model_dump(),
+            }
+            if gate["type"] == "ambiguous":
+                candidates.append({"fact_1": left.model_dump(), "fact_2": right.model_dump()})
+                gated.append((left, right))
+            else:
+                deterministic["corroborations" if gate["type"] == "corroboration" else "contradictions"].append(relationship)
+        if not candidates:
+            return {**deterministic, "failures": list(self.extraction_failures)}
         if self.client is None:
             return {
-                "corroborations": [],
-                "contradictions": [],
-                "failures": [{"type": "reasoning_failure", "description": self.provider_status()["error"] or "LLM provider is not configured"}],
+                **deterministic,
+                "failures": list(self.extraction_failures) + [{"type": "reasoning_failure", "description": self.provider_status()["error"] or "LLM provider is not configured"}],
             }
         with self._lock:
             if self._reasoning_cache and self._reasoning_cache[0] == self._facts_version:
@@ -822,6 +1009,9 @@ Candidate pairs:
         try:
             response = self._generate_content(prompt, ReasoningOutput)
             result = self._ground_relationships(self._parse_json(response.text), facts)
+            result["corroborations"] = deterministic["corroborations"] + result.get("corroborations", [])
+            result["contradictions"] = deterministic["contradictions"] + result.get("contradictions", [])
+            result["failures"] = list(self.extraction_failures) + result.get("failures", [])
             with self._lock:
                 self._reasoning_cache = (self._facts_version, result)
             return result
