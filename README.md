@@ -88,7 +88,7 @@ python3 -m pytest -q
 python3 -m compileall -q core api ui
 ```
 
-Tests cover incremental chunking, evidence preservation, empty inputs, batch
-uploads, extension validation, async lifecycle, health/API shape, and the
-four-case relationship response contract. Live Gemini classification requires
+Tests cover incremental chunking, evidence preservation and grounding, empty
+inputs, batch uploads, extension validation, async lifecycle, health/API shape,
+and the four-case relationship response contract. Live Gemini classification requires
 `GEMINI_API_KEY`; all other checks run offline.
