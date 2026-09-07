@@ -4,6 +4,7 @@ import re
 import threading
 import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterable, List, Optional
 
 import fitz  # PyMuPDF
@@ -64,13 +65,22 @@ class ReasoningOutput(BaseModel):
 class FactLayer:
     """Incremental document extraction with bounded, lexical candidate retrieval."""
 
-    def __init__(self, client: Any = None, chunk_size: int = 12000, chunk_overlap: int = 400):
+    def __init__(
+        self,
+        client: Any = None,
+        chunk_size: int = 12000,
+        chunk_overlap: int = 400,
+        max_workers: Optional[int] = None,
+    ):
         self.facts: List[Fact] = []
         self.client = client if client is not None else self._build_client()
         self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "4"))
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._lock = threading.RLock()
+        self._facts_version = 0
+        self._reasoning_cache: tuple[int, dict] | None = None
 
     @staticmethod
     def _build_client() -> Any:
@@ -146,10 +156,14 @@ Page markers are authoritative:
         )
         return json.loads(response.text)
 
-    def process_document(self, filepath: str, filename: str):
+    def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
         extracted = 0
-        for chunk in self.iter_text_chunks(filepath, filename):
+        chunks = list(self.iter_text_chunks(filepath, filename))
+        total_chunks = len(chunks)
+
+        def extract(index_and_chunk):
+            index, chunk = index_and_chunk
             try:
                 data = self._extract_chunk(chunk)
                 new_facts = []
@@ -168,11 +182,23 @@ Page markers are authoritative:
                             ],
                         )
                     )
+                return index, new_facts, None
+            except Exception as exc:
+                return index, [], str(exc)
+
+        with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
+            futures = [executor.submit(extract, item) for item in enumerate(chunks)]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                _, new_facts, error = future.result()
                 with self._lock:
                     self.facts.extend(new_facts)
+                    self._facts_version += len(new_facts)
+                    self._reasoning_cache = None
                 extracted += len(new_facts)
-            except Exception as exc:
-                errors.append(str(exc))
+                if error:
+                    errors.append(error)
+                if progress_callback:
+                    progress_callback(completed, total_chunks)
         if not extracted and errors:
             status = "failed"
         elif errors:
@@ -227,6 +253,9 @@ Page markers are authoritative:
                 "contradictions": [],
                 "failures": [{"type": "reasoning_failure", "description": "GEMINI_API_KEY is not configured"}],
             }
+        with self._lock:
+            if self._reasoning_cache and self._reasoning_cache[0] == self._facts_version:
+                return self._reasoning_cache[1]
         prompt = f"""
 Classify each candidate fact pair. Use exactly one of these relationship types:
 "corroboration" (independent evidence supports the same claim),
@@ -249,7 +278,10 @@ Candidate pairs:
                     response_schema=ReasoningOutput,
                 ),
             )
-            return json.loads(response.text)
+            result = json.loads(response.text)
+            with self._lock:
+                self._reasoning_cache = (self._facts_version, result)
+            return result
         except Exception as exc:
             return {
                 "corroborations": [],
