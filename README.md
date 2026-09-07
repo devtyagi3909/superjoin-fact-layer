@@ -20,6 +20,7 @@ export GEMINI_MAX_WORKERS="2"                # optional; keep low on free tier
 export GEMINI_MAX_CHUNKS="8"                 # optional; groups pages, never drops them
 export GEMINI_MAX_RETRIES="1"                # optional; bounded 429 retry count
 export GEMINI_MAX_RETRY_WAIT_SECONDS="8"     # optional; no indefinite waits
+export LLM_MAX_INPUT_CHARS="20000"           # optional; full prompt budget, Groq-safe
 python api/main.py                            # terminal 1
 streamlit run ui/app.py                       # terminal 2
 ```
@@ -34,6 +35,7 @@ export LLM_PROVIDER=openai_compatible
 export LLM_API_KEY="gsk_..."
 export LLM_BASE_URL="https://api.groq.com/openai/v1"
 export LLM_MODEL="openai/gpt-oss-120b"
+export LLM_MAX_INPUT_CHARS="20000"           # keep 18000-24000 on Groq free tier
 
 # OpenRouter (many free or low-cost models; availability and limits change)
 export LLM_PROVIDER=openai_compatible
@@ -74,11 +76,33 @@ curl -sS "$LLM_BASE_URL/chat/completions" \
 ```
 
 The default `GEMINI_MAX_CHUNKS=8` is a provider-call cap, not a page drop:
-even a 28-page document is grouped into at most 8 provider calls.
+even a 28-page document is grouped into at most 8 provider calls. The
+independent `LLM_MAX_INPUT_CHARS` budget applies to the complete generated
+prompt (instructions plus extracted text), so adjacent source chunks are grouped
+only while they fit. An individual long page is split with overlap; text is never
+silently discarded. If the document cannot fit both limits, processing fails
+clearly rather than fabricating facts.
 
 `/provider-diagnostics` exposes the active provider, model, endpoint, and a
-safe configuration hint. Never put a key in a debug script or commit it; revoke
+safe configuration hint, including effective input-character budget, maximum
+provider calls, and worker count. Never put a key in a debug script or commit it; revoke
 and rotate any key that was previously exposed that way.
+
+After changing provider settings, restart the API so the process reloads them:
+
+```bash
+kill "$API_PID"                # set API_PID to the API process PID
+python api/main.py
+```
+
+For a tiny live smoke test, use a short prompt and the configured model:
+
+```bash
+curl -sS "$LLM_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $LLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$LLM_MODEL\",\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"Return JSON only: {\\\"facts\\\":[]}\"}]}"
+```
 
 ## Deterministic demo path
 

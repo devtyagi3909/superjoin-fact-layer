@@ -261,6 +261,44 @@ def test_provider_errors_are_actionable_without_provider_payloads():
     assert classify_provider_error(TimeoutError("request timed out"), "openai_compatible")["code"] == "provider_timeout"
 
 
+def test_request_too_large_errors_are_classified_without_payloads():
+    error = type("HTTPError", (RuntimeError,), {"status_code": 413})(
+        "413 Request Entity Too Large secret request body"
+    )
+    result = classify_provider_error(error, "openai_compatible")
+    assert result["code"] == "provider_request_too_large"
+    assert "No facts were fabricated" in result["message"]
+    assert "secret request body" not in result["message"]
+
+
+def test_request_too_large_call_is_not_retried_and_keeps_call_index():
+    class TooLargeModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, **_kwargs):
+            self.calls += 1
+            raise type("HTTPError", (RuntimeError,), {"status_code": 413})(
+                "413 request too large internal payload"
+            )
+
+    models = TooLargeModels()
+    layer = FactLayer(
+        client=type("Client", (), {"models": models})(),
+        max_workers=1,
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
+        handle.write("short source")
+        handle.flush()
+        result = layer.process_document(handle.name, "sample.txt")
+    assert models.calls == 1
+    assert result["status"] == "failed"
+    assert result["provider_calls_total"] == 1
+    assert result["provider_calls_succeeded"] == 0
+    assert result["failed_provider_calls"] == [1]
+    assert result["errors"][0]["code"] == "provider_request_too_large"
+
+
 def test_openai_compatible_retries_without_unsupported_structured_output():
     class Completions:
         def __init__(self):
@@ -316,6 +354,48 @@ def test_invalid_chunk_cap_is_corrected_and_28_source_chunks_use_at_most_8_calls
     assert result["source_chunks_total"] == 28
     assert result["chunks_total"] <= 8
     assert layer.client.models.calls == result["chunks_total"]
+
+
+def test_provider_budget_groups_28_source_chunks_without_oversized_prompts(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_INPUT_CHARS", "2000")
+
+    class RecordingModels:
+        def __init__(self):
+            self.prompts = []
+
+        def generate_content(self, **kwargs):
+            self.prompts.append(kwargs["contents"])
+            return type("Response", (), {"text": '{"facts": []}'})()
+
+    models = RecordingModels()
+    layer = FactLayer(
+        client=type("Client", (), {"models": models})(),
+        chunk_size=1000,
+        max_workers=1,
+    )
+    source_chunks = [f"\n--- Page {page} ---\n" + ("evidence " * 20) for page in range(1, 29)]
+    monkeypatch.setattr(layer, "iter_text_chunks", lambda *_args: iter(source_chunks))
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pdf", encoding="utf-8") as handle:
+        handle.write("source")
+        handle.flush()
+        result = layer.process_document(handle.name, "sample.pdf")
+    assert result["source_chunks_total"] == 28
+    assert result["provider_calls_total"] <= layer.max_chunks
+    assert len(models.prompts) == result["provider_calls_total"]
+    assert all(len(prompt) <= layer.max_input_chars for prompt in models.prompts)
+    assert all(f"--- Page {page} ---" in "\n".join(models.prompts) for page in range(1, 29))
+
+
+def test_provider_diagnostics_exposes_request_budget_and_call_limits(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_INPUT_CHARS", "18000")
+    with TestClient(app) as client:
+        response = client.get("/provider-diagnostics")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["effective_max_input_chars"] == fact_layer.max_input_chars
+    assert payload["max_chunks"] == fact_layer.max_chunks
+    assert payload["max_workers"] == fact_layer.max_workers
+    assert payload["model"] == fact_layer.model
 
 
 def test_quota_retry_honors_retry_after_without_raw_provider_blob(monkeypatch):
