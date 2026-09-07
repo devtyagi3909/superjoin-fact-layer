@@ -1,17 +1,22 @@
-import os
 import json
+import os
+import re
+import threading
 import uuid
-import tempfile
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from collections import Counter, defaultdict
+from typing import Any, Iterable, List, Optional
+
 import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
+from pydantic import BaseModel
+
 
 class FactEvidence(BaseModel):
     document_name: str
     page: Optional[int]
     excerpt: str
+
 
 class Fact(BaseModel):
     id: str
@@ -19,14 +24,17 @@ class Fact(BaseModel):
     value: Optional[str]
     evidence: List[FactEvidence]
 
+
 class FactOutput(BaseModel):
     text: str
-    value: Optional[str]
+    value: Optional[str] = None
     excerpt: str
-    page: Optional[int]
+    page: Optional[int] = None
+
 
 class FactList(BaseModel):
     facts: list[FactOutput]
+
 
 class Corroboration(BaseModel):
     type: str = "corroboration"
@@ -34,120 +42,219 @@ class Corroboration(BaseModel):
     fact_2: str
     explanation: str
 
+
 class Contradiction(BaseModel):
     type: str
     fact_1: str
     fact_2: str
     explanation: str
 
+
 class Failure(BaseModel):
     type: str
     description: str
 
+
 class ReasoningOutput(BaseModel):
-    corroborations: list[Corroboration]
-    contradictions: list[Contradiction]
-    failures: list[Failure]
+    corroborations: list[Corroboration] = []
+    contradictions: list[Contradiction] = []
+    failures: list[Failure] = []
+
 
 class FactLayer:
-    def __init__(self):
+    """Incremental document extraction with bounded, lexical candidate retrieval."""
+
+    def __init__(self, client: Any = None, chunk_size: int = 12000, chunk_overlap: int = 400):
         self.facts: List[Fact] = []
-        self.client = genai.Client()
+        self.client = client if client is not None else self._build_client()
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _build_client() -> Any:
+        # Importing the layer remains useful for local tests and API health checks.
+        if not os.getenv("GEMINI_API_KEY"):
+            return None
+        return genai.Client()
 
     def extract_text_from_pdf(self, filepath: str) -> List[dict]:
-        pages_text = []
-        doc = fitz.open(filepath)
-        for i in range(len(doc)):
-            page = doc.load_page(i)
-            text = page.get_text()
-            if text.strip():
-                pages_text.append({"page": i + 1, "text": text})
-        return pages_text
+        return list(self._iter_pdf_pages(filepath))
+
+    def _iter_pdf_pages(self, filepath: str) -> Iterable[dict]:
+        with fitz.open(filepath) as doc:
+            for i, page in enumerate(doc):
+                text = page.get_text()
+                if text.strip():
+                    yield {"page": i + 1, "text": text}
+
+    def _chunk_pages(self, pages: Iterable[dict]) -> Iterable[str]:
+        buffer = ""
+        buffer_page = None
+        for page in pages:
+            text = page["text"].strip()
+            if not text:
+                continue
+            marker = f"\n--- Page {page['page']} ---\n"
+            if buffer and len(buffer) + len(marker) + len(text) > self.chunk_size:
+                yield buffer
+                overlap = buffer[-self.chunk_overlap:] if self.chunk_overlap else ""
+                buffer = overlap
+            if not buffer:
+                buffer_page = page["page"]
+            buffer += marker + text
+            # Split exceptionally long single pages without retaining the full page.
+            while len(buffer) > self.chunk_size:
+                yield buffer[: self.chunk_size]
+                buffer = buffer[self.chunk_size - self.chunk_overlap :]
+                buffer_page = buffer_page
+        if buffer.strip():
+            yield buffer
+
+    def iter_text_chunks(self, filepath: str, filename: str) -> Iterable[str]:
+        if filepath.lower().endswith(".pdf") or filename.lower().endswith(".pdf"):
+            yield from self._chunk_pages(self._iter_pdf_pages(filepath))
+            return
+        def text_pages():
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+                while True:
+                    text = handle.read(self.chunk_size)
+                    if not text:
+                        break
+                    yield {"page": 1, "text": text}
+
+        yield from self._chunk_pages(text_pages())
+
+    def _extract_chunk(self, chunk: str) -> dict:
+        if self.client is None:
+            raise RuntimeError("GEMINI_API_KEY is not configured")
+        prompt = f"""
+Extract key factual claims from this document chunk. Return only claims supported by
+the text. For every claim provide a concise "text", a numerical or categorical
+"value" when present, a verbatim supporting "excerpt", and the source "page".
+Page markers are authoritative:
+{chunk}
+"""
+        response = self.client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=FactList,
+            ),
+        )
+        return json.loads(response.text)
 
     def process_document(self, filepath: str, filename: str):
-        if filepath.endswith('.pdf') or filename.endswith('.pdf'):
-            pages = self.extract_text_from_pdf(filepath)
+        errors = []
+        extracted = 0
+        for chunk in self.iter_text_chunks(filepath, filename):
+            try:
+                data = self._extract_chunk(chunk)
+                new_facts = []
+                for item in data.get("facts", []):
+                    new_facts.append(
+                        Fact(
+                            id=str(uuid.uuid4()),
+                            text=item.get("text", ""),
+                            value=item.get("value"),
+                            evidence=[
+                                FactEvidence(
+                                    document_name=filename,
+                                    page=item.get("page"),
+                                    excerpt=item.get("excerpt", ""),
+                                )
+                            ],
+                        )
+                    )
+                with self._lock:
+                    self.facts.extend(new_facts)
+                extracted += len(new_facts)
+            except Exception as exc:
+                errors.append(str(exc))
+        if not extracted and errors:
+            status = "failed"
+        elif errors:
+            status = "partial"
         else:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                pages = [{"page": 1, "text": f.read()}]
-
-        combined_text = ""
-        for page_info in pages:
-            combined_text += f"\n--- Page {page_info['page']} ---\n{page_info['text']}\n"
-
-        prompt = f"""
-        Extract the key financial, operational, and business facts from the following text.
-        For each fact, extract:
-        - "text": A concise description of the fact.
-        - "value": The numerical or categorical value associated with the fact (if applicable).
-        - "excerpt": A direct quote from the text supporting the fact.
-        - "page": The page number where the fact was found (look at the --- Page X --- markers).
-        
-        Text:
-        {combined_text}
-        """
-        
-        try:
-            response = self.client.models.generate_content(
-                model='gemini-2.5-pro',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=FactList,
-                )
-            )
-            
-            extracted_data = json.loads(response.text)
-            for item in extracted_data.get("facts", []):
-                fact_id = str(uuid.uuid4())
-                fact = Fact(
-                    id=fact_id,
-                    text=item.get("text", ""),
-                    value=item.get("value"),
-                    evidence=[FactEvidence(
-                        document_name=filename,
-                        page=item.get("page"),
-                        excerpt=item.get("excerpt", "")
-                    )]
-                )
-                self.facts.append(fact)
-        except Exception as e:
-            print(f"Error extracting facts: {e}")
-
-        return {"status": "success", "message": f"Processed {filename}"}
+            status = "success"
+        return {
+            "status": status,
+            "message": f"Processed {filename}",
+            "facts_extracted": extracted,
+            "errors": errors,
+        }
 
     def get_facts(self) -> List[Fact]:
-        return self.facts
+        with self._lock:
+            return list(self.facts)
+
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]{2,}", text.lower()))
+
+    def retrieve_related_facts(self, facts: List[Fact], top_k: int = 5) -> list[tuple[Fact, Fact]]:
+        """Use an inverted lexical index, avoiding an all-pairs comparison."""
+        index: dict[str, set[int]] = defaultdict(set)
+        tokens = []
+        for i, fact in enumerate(facts):
+            fact_tokens = FactLayer._tokens(f"{fact.text} {fact.value or ''}")
+            tokens.append(fact_tokens)
+            for token in fact_tokens:
+                index[token].add(i)
+        pairs: set[tuple[int, int]] = set()
+        for i, fact_tokens in enumerate(tokens):
+            candidates = Counter(j for token in fact_tokens for j in index[token] if j != i)
+            for j, _ in candidates.most_common(top_k):
+                pairs.add(tuple(sorted((i, j))))
+        return [(facts[i], facts[j]) for i, j in pairs]
 
     def run_reasoning(self):
-        if not self.facts:
+        facts = self.get_facts()
+        if not facts:
             return {"corroborations": [], "contradictions": [], "failures": []}
-
-        facts_json = json.dumps([f.model_dump() for f in self.facts], indent=2)
-        
+        pairs = self.retrieve_related_facts(facts)
+        if not pairs:
+            return {"corroborations": [], "contradictions": [], "failures": []}
+        candidates = [
+            {"fact_1": left.model_dump(), "fact_2": right.model_dump()}
+            for left, right in pairs
+        ]
+        if self.client is None:
+            return {
+                "corroborations": [],
+                "contradictions": [],
+                "failures": [{"type": "reasoning_failure", "description": "GEMINI_API_KEY is not configured"}],
+            }
         prompt = f"""
-        Analyze the following list of facts extracted from documents.
-        Identify relationships between these facts:
-        1. "corroboration": Facts from different sources or parts of documents that support the same information.
-        2. "genuine_contradiction": Facts that directly conflict with each other.
-        3. "explained_by_context": Facts that seem to contradict but can be explained by context (e.g., different currencies, different time periods).
-        
-        Facts:
-        {facts_json}
-        """
+Classify each candidate fact pair. Use exactly one of these relationship types:
+"corroboration" (independent evidence supports the same claim),
+"genuine_contradiction" (the claims cannot both be true in the same scope),
+"explained_by_context" (the apparent conflict is explained by period, scope,
+currency, unit, or another explicit context), or "extraction_failure" (evidence
+is insufficient or malformed). Include the supporting evidence and reasoning in
+"explanation". Put corroboration pairs in "corroborations", the two contradiction
+types in "contradictions", and extraction failures in "failures".
 
+Candidate pairs:
+{json.dumps(candidates, indent=2)}
+"""
         try:
             response = self.client.models.generate_content(
-                model='gemini-2.5-pro',
+                model="gemini-2.5-pro",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=ReasoningOutput,
-                )
+                ),
             )
             return json.loads(response.text)
-        except Exception as e:
-            print(f"Error reasoning: {e}")
-            return {"corroborations": [], "contradictions": [], "failures": [{"type": "reasoning_failure", "description": str(e)}]}
+        except Exception as exc:
+            return {
+                "corroborations": [],
+                "contradictions": [],
+                "failures": [{"type": "reasoning_failure", "description": str(exc)}],
+            }
+
 
 fact_layer = FactLayer()

@@ -46,9 +46,26 @@ Built as an exploration into AI agents for finance for the Superjoin Engineering
     
     The UI will be accessible at `http://localhost:8501`.
 
+### Try the included starter data
+
+The assignment bundle contains curated PDFs under `../delhivery/` and
+`../india-macroeconomy/`. Upload at least two documents from the same dataset to
+exercise cross-document reasoning. The API returns a `job_id` immediately:
+
+```bash
+curl -F "file=@../delhivery/01-delhivery-prospectus-2022-excerpt.pdf" \
+  http://localhost:8000/upload
+curl http://localhost:8000/upload/<job_id>
+curl http://localhost:8000/facts
+curl http://localhost:8000/corroborations
+```
+
 ## Video Demo
 
-[Link to Demo Video] *(Replace with your unlisted YouTube or Loom link)*
+Add an unlisted video link before submission. It should be no longer than three
+minutes and show one upload, job polling, the facts table, and all four required
+outcomes. The repository is intentionally credential-free; reviewers can use
+the included sample PDFs with their own Gemini key.
 
 *The video demonstrates uploading documents, viewing the extracted facts linked to source evidence, and the reasoning engine correctly categorizing relationships.*
 
@@ -57,20 +74,43 @@ Built as an exploration into AI agents for finance for the Superjoin Engineering
 The system is designed with a **separation of concerns** representing modern AI product architectures:
 
 1.  **Core Parser (`core/parser.py`)**: Uses `PyMuPDF (fitz)` to accurately extract text from documents, maintaining page structures. It chunks the text, applies explicit `Pydantic` schemas, and sends it to `gemini-2.5-pro` using the `google-genai` structured outputs feature.
-    - *Why this matters*: Using structured JSON schemas directly at the API level (instead of prompt-hacking) guarantees robust output that won't break the application pipeline.
-2.  **Reasoning Engine**: Instead of comparing facts via hard-coded keyword matching, the engine takes the aggregated universe of facts and uses the LLM to contextually evaluate relationships, outputting categorizations like `corroboration`, `genuine_contradiction`, and `explained_by_context`. 
+    - *Why this matters*: Structured JSON schemas keep chunk results robust while bounded page-aware chunks avoid sending an entire large PDF in one request.
+2.  **Retrieval and Reasoning**: An in-memory inverted lexical index selects a small set of related fact pairs before the LLM evaluates them. This avoids all-pairs comparisons and degrades with a clear failure when `GEMINI_API_KEY` is unavailable. Relationships are classified as `corroboration`, `genuine_contradiction`, `explained_by_context`, or `extraction_failure`.
 3.  **API (`api/main.py`)**: A `FastAPI` layer serves as the backbone. This means the knowledge layer isn't just a script—it's a microservice ready to be integrated into a larger IPO readiness platform.
 4.  **UI (`ui/app.py`)**: A fast, responsive `Streamlit` dashboard for merchant bankers to inspect results. 
 
 ## Limitations and Next Steps
 
 **What doesn't work perfectly yet:**
-- *Token Limits on Massive Documents*: Currently, documents are passed entirely in one context window. While Gemini handles 2M tokens, 1000+ page S-1 filings might degrade reasoning quality or hit limits.
-- *Vector Database Missing*: All facts are stored in memory. If the server restarts, knowledge is lost. 
+- Facts and job state are currently in memory and are lost when the server restarts.
+- The retrieval layer is deterministic lexical retrieval rather than a hosted vector database, so domain-specific synonyms may not match.
+- The four-case examples are data-dependent: without a Gemini key, the local
+  smoke tests verify extraction and job failure handling but cannot produce
+  live relationship classifications.
+
+### Representative output shape
+
+Each fact includes a stable ID and source evidence:
+
+```json
+{
+  "id": "generated-uuid",
+  "text": "Revenue increased during the reported period",
+  "value": "₹X crore",
+  "evidence": [{
+    "document_name": "annual-report.pdf",
+    "page": 42,
+    "excerpt": "verbatim supporting text"
+  }]
+}
+```
+
+Reasoning returns corroborations, contradictions (including contextual
+reconciliation), and explicit failures with explanations. No company-specific
+terms, filenames, or facts are hard-coded.
 
 **What I would build next (Next Steps):**
-- **Vector Retrieval (RAG)**: Integrate `ChromaDB` or `Qdrant`. When extracting facts from a new document, we would query the vector DB for semantically similar facts first, and only run the Reasoning Engine on that subset. This makes the system scalable to hundreds of documents (O(1) reasoning vs O(N)).
-- **Chunking Strategy**: Implement hierarchical chunking for giant PDFs (e.g., LlamaIndex node parsers) so we only process relevant sections.
+- **Persistent Retrieval**: Replace the in-memory index with ChromaDB or Qdrant when durable storage and embeddings are required.
 - **Source Highlighting**: Pass exact bounding boxes from `PyMuPDF` to the frontend UI so users can click a fact and see the exact highlight on the original PDF.
 
 ## Additional Notes
