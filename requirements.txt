@@ -9,3 +9,4 @@ PyMuPDF
 google-genai
 requests
 pandas
+openai

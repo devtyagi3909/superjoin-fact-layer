@@ -9,8 +9,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterable, List, Optional
 
 import fitz  # PyMuPDF
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:  # Optional when an OpenAI-compatible provider is used.
+    genai = None
+    types = None
 from pydantic import BaseModel
 
 
@@ -68,7 +72,7 @@ class ProviderQuotaError(RuntimeError):
 
     def __init__(self, retry_after_seconds: int | None = None):
         self.retry_after_seconds = retry_after_seconds
-        message = "Gemini quota is temporarily exhausted."
+        message = "The configured LLM provider quota is temporarily exhausted."
         if retry_after_seconds:
             message += f" Retry after about {retry_after_seconds} seconds."
         super().__init__(message)
@@ -116,14 +120,15 @@ def _retry_after_seconds(error: Exception) -> int | None:
     return None
 
 
-def classify_provider_error(error: Exception) -> dict:
+def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
     """Return a stable API/UI error without exposing provider payloads."""
     text = str(error).lower()
     if "429" in text or "resource_exhausted" in text or "quota" in text or "rate limit" in text:
         retry_after = _retry_after_seconds(error)
-        message = "Gemini quota is temporarily exhausted. Please wait and retry the upload."
+        provider_name = "Gemini" if provider == "gemini" else "LLM provider"
+        message = f"{provider_name} quota is temporarily exhausted. Please wait and retry the upload."
         if retry_after:
-            message = f"Gemini quota is temporarily exhausted. Retry after about {retry_after} seconds."
+            message = f"{provider_name} quota is temporarily exhausted. Retry after about {retry_after} seconds."
         return {
             "code": "provider_quota",
             "message": message,
@@ -149,8 +154,9 @@ class FactLayer:
         max_workers: Optional[int] = None,
     ):
         self.facts: List[Fact] = []
+        self.provider = os.getenv("LLM_PROVIDER", "gemini" if os.getenv("GEMINI_API_KEY") else "openai_compatible" if os.getenv("LLM_API_KEY") else "gemini").lower()
+        self.model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.client = client if client is not None else self._build_client()
-        self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "2"))
         self.max_chunks = int(os.getenv("GEMINI_MAX_CHUNKS", "8"))
         self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "1"))
@@ -162,12 +168,45 @@ class FactLayer:
         self._reasoning_cache: tuple[int, dict] | None = None
         self._quota_cooldown_until = 0.0
 
+    def _build_client(self) -> Any:
+        if self.provider == "gemini":
+            if not os.getenv("GEMINI_API_KEY"):
+                return None
+            if genai is None:
+                return None
+            return genai.Client()
+        if self.provider == "openai_compatible":
+            if not os.getenv("LLM_API_KEY"):
+                return None
+            try:
+                from openai import OpenAI
+            except ImportError:
+                return None
+            return OpenAI(
+                api_key=os.environ["LLM_API_KEY"],
+                base_url=os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+            )
+        return None
+
+    def provider_status(self) -> dict:
+        key_configured = bool(os.getenv("GEMINI_API_KEY" if self.provider == "gemini" else "LLM_API_KEY"))
+        sdk_available = genai is not None if self.provider == "gemini" else self._openai_sdk_available()
+        error = None
+        if self.provider not in {"gemini", "openai_compatible"}:
+            error = "Unsupported LLM_PROVIDER. Use gemini or openai_compatible."
+        elif not key_configured:
+            error = f"{'GEMINI_API_KEY' if self.provider == 'gemini' else 'LLM_API_KEY'} is not configured."
+        elif not sdk_available:
+            error = f"{'google-genai' if self.provider == 'gemini' else 'openai'} SDK is not installed. Install requirements.txt."
+        return {"provider": self.provider, "model": self.model, "configured": self.client is not None and error is None, "sdk_available": sdk_available, "error": error}
+
     @staticmethod
-    def _build_client() -> Any:
-        # Importing the layer remains useful for local tests and API health checks.
-        if not os.getenv("GEMINI_API_KEY"):
-            return None
-        return genai.Client()
+    def _openai_sdk_available() -> bool:
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            return False
+        return True
 
     def extract_text_from_pdf(self, filepath: str) -> List[dict]:
         return list(self._iter_pdf_pages(filepath))
@@ -227,21 +266,25 @@ class FactLayer:
 
     def _generate_content(self, prompt: str, schema: Any) -> Any:
         if self.client is None:
-            raise RuntimeError("GEMINI_API_KEY is not configured")
+            status = self.provider_status()
+            raise RuntimeError(status["error"] or "LLM provider is not configured.")
         if self.quota_cooldown_remaining() > 0:
             raise ProviderQuotaError(round(self.quota_cooldown_remaining()))
         for attempt in range(self.max_retries + 1):
             try:
-                return self.client.models.generate_content(
+                if self.provider == "gemini":
+                    return self.client.models.generate_content(
+                        model=self.model, contents=prompt,
+                        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema),
+                    )
+                response = self.client.chat.completions.create(
                     model=self.model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                    ),
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
                 )
+                return type("OpenAIResponse", (), {"text": response.choices[0].message.content})()
             except Exception as exc:
-                details = classify_provider_error(exc)
+                details = classify_provider_error(exc, self.provider)
                 if details["code"] != "provider_quota" or attempt >= self.max_retries:
                     if details["code"] == "provider_quota":
                         self._set_quota_cooldown(details["retry_after_seconds"])
@@ -267,7 +310,7 @@ class FactLayer:
             return None
         return {
             "code": "provider_quota",
-            "message": f"Gemini quota cooldown is active for about {remaining} seconds.",
+            "message": f"LLM provider quota cooldown is active for about {remaining} seconds.",
             "retry_after_seconds": remaining,
             "retryable": True,
         }
@@ -321,7 +364,7 @@ Page markers are authoritative:
                     )
                 return index, new_facts, None
             except Exception as exc:
-                return index, [], classify_provider_error(exc)
+                return index, [], classify_provider_error(exc, self.provider)
 
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
             futures = [executor.submit(extract, item) for item in enumerate(chunks)]
@@ -515,7 +558,7 @@ Page markers are authoritative:
             return {
                 "corroborations": [],
                 "contradictions": [],
-                "failures": [{"type": "reasoning_failure", "description": "GEMINI_API_KEY is not configured"}],
+                "failures": [{"type": "reasoning_failure", "description": self.provider_status()["error"] or "LLM provider is not configured"}],
             }
         with self._lock:
             if self._reasoning_cache and self._reasoning_cache[0] == self._facts_version:
@@ -540,7 +583,7 @@ Candidate pairs:
                 self._reasoning_cache = (self._facts_version, result)
             return result
         except Exception as exc:
-            error = classify_provider_error(exc)
+            error = classify_provider_error(exc, self.provider)
             return {
                 "corroborations": [],
                 "contradictions": [],
