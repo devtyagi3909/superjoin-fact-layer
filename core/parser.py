@@ -78,6 +78,10 @@ class ProviderQuotaError(RuntimeError):
         super().__init__(message)
 
 
+def _provider_label(provider: str) -> str:
+    return "Gemini" if provider == "gemini" else "OpenAI-compatible provider"
+
+
 RELATIONSHIP_STYLES = {
     "corroboration": {"label": "Corroboration", "color": "#16a34a"},
     "genuine_contradiction": {"label": "Genuine contradiction", "color": "#dc2626"},
@@ -123,6 +127,7 @@ def _retry_after_seconds(error: Exception) -> int | None:
 def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
     """Return a stable API/UI error without exposing provider payloads."""
     text = str(error).lower()
+    status_code = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
     if "429" in text or "resource_exhausted" in text or "quota" in text or "rate limit" in text:
         retry_after = _retry_after_seconds(error)
         provider_name = "Gemini" if provider == "gemini" else "LLM provider"
@@ -135,9 +140,22 @@ def classify_provider_error(error: Exception, provider: str = "gemini") -> dict:
             "retry_after_seconds": retry_after,
             "retryable": True,
         }
+    provider_name = _provider_label(provider)
+    if any(term in text for term in ("401", "unauthorized", "invalid api key", "authentication")):
+        return {"code": "provider_auth", "message": f"{provider_name} authentication failed. Check the configured API key.", "retry_after_seconds": None, "retryable": False}
+    if "endpoint" in text or ("url" in text and (status_code == 404 or "404" in text)):
+        return {"code": "provider_endpoint", "message": f"{provider_name} endpoint was not found. Check LLM_BASE_URL.", "retry_after_seconds": None, "retryable": False}
+    if status_code == 404 or any(term in text for term in ("404", "unknown model", "model not found", "invalid model")):
+        return {"code": "provider_model", "message": f"{provider_name} model was not found. Check LLM_MODEL and the provider's model list.", "retry_after_seconds": None, "retryable": False}
+    if any(term in text for term in ("timeout", "timed out", "deadline exceeded", "readtimeout")):
+        return {"code": "provider_timeout", "message": f"{provider_name} timed out. Retry the request or use a smaller model.", "retry_after_seconds": None, "retryable": True}
+    if any(term in text for term in ("response_format", "json_object", "structured output", "structured-output")):
+        return {"code": "provider_structured_output", "message": f"{provider_name} rejected structured JSON output. Retrying without response_format.", "retry_after_seconds": None, "retryable": True}
+    if any(term in text for term in ("400", "bad request", "invalid request")):
+        return {"code": "provider_bad_request", "message": f"{provider_name} rejected the request. Check the model and endpoint configuration.", "retry_after_seconds": None, "retryable": False}
     return {
         "code": "extraction_error",
-        "message": "The document could not be processed. Check the file and try again.",
+        "message": f"{provider_name} request failed. Check the provider configuration and try again.",
         "retry_after_seconds": None,
         "retryable": False,
     }
@@ -156,6 +174,7 @@ class FactLayer:
         self.facts: List[Fact] = []
         self.provider = os.getenv("LLM_PROVIDER", "gemini" if os.getenv("GEMINI_API_KEY") else "openai_compatible" if os.getenv("LLM_API_KEY") else "gemini").lower()
         self.model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        self.base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
         self.client = client if client is not None else self._build_client()
         self.max_workers = max_workers or int(os.getenv("GEMINI_MAX_WORKERS", "2"))
         self.max_chunks = int(os.getenv("GEMINI_MAX_CHUNKS", "8"))
@@ -184,7 +203,7 @@ class FactLayer:
                 return None
             return OpenAI(
                 api_key=os.environ["LLM_API_KEY"],
-                base_url=os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
+                base_url=self.base_url,
             )
         return None
 
@@ -198,7 +217,16 @@ class FactLayer:
             error = f"{'GEMINI_API_KEY' if self.provider == 'gemini' else 'LLM_API_KEY'} is not configured."
         elif not sdk_available:
             error = f"{'google-genai' if self.provider == 'gemini' else 'openai'} SDK is not installed. Install requirements.txt."
-        return {"provider": self.provider, "model": self.model, "configured": self.client is not None and error is None, "sdk_available": sdk_available, "error": error}
+        elif self.provider == "openai_compatible" and not self.model:
+            error = "LLM_MODEL is not configured."
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "base_url": self.base_url if self.provider == "openai_compatible" else None,
+            "configured": self.client is not None and error is None,
+            "sdk_available": sdk_available,
+            "error": error,
+        }
 
     @staticmethod
     def _openai_sdk_available() -> bool:
@@ -277,11 +305,18 @@ class FactLayer:
                         model=self.model, contents=prompt,
                         config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema),
                     )
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                )
+                request = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    response = self.client.chat.completions.create(**request)
+                except Exception as exc:
+                    if classify_provider_error(exc, self.provider)["code"] != "provider_structured_output":
+                        raise
+                    request.pop("response_format")
+                    response = self.client.chat.completions.create(**request)
                 return type("OpenAIResponse", (), {"text": response.choices[0].message.content})()
             except Exception as exc:
                 details = classify_provider_error(exc, self.provider)
@@ -327,7 +362,18 @@ Page markers are authoritative:
 {chunk}
 """
         response = self._generate_content(prompt, FactList)
-        return json.loads(response.text)
+        return self._parse_json(response.text)
+
+    @staticmethod
+    def _parse_json(text: str) -> dict:
+        """Decode provider output without inventing or repairing facts."""
+        candidate = text.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I).strip()
+        parsed = json.loads(candidate)
+        if not isinstance(parsed, dict):
+            raise ValueError("Provider returned JSON that is not an object.")
+        return parsed
 
     def process_document(self, filepath: str, filename: str, progress_callback=None):
         errors = []
@@ -578,7 +624,7 @@ Candidate pairs:
 """
         try:
             response = self._generate_content(prompt, ReasoningOutput)
-            result = self._ground_relationships(json.loads(response.text), facts)
+            result = self._ground_relationships(self._parse_json(response.text), facts)
             with self._lock:
                 self._reasoning_cache = (self._facts_version, result)
             return result

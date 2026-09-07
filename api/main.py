@@ -199,6 +199,21 @@ async def health():
     return {"status": "ok", "gemini_configured": provider["provider"] == "gemini" and provider["configured"], **provider}
 
 
+@app.get("/provider-diagnostics")
+async def provider_diagnostics():
+    """Expose safe configuration hints; credentials and provider responses stay private."""
+    provider = fact_layer.provider_status()
+    return {
+        **provider,
+        "hint": (
+            "For Groq, use https://api.groq.com/openai/v1 and a model returned by "
+            "GET https://api.groq.com/openai/v1/models."
+            if provider["provider"] == "openai_compatible"
+            else None
+        ),
+    }
+
+
 @app.get("/corroborations")
 async def check_corroborations():
     return fact_layer.run_reasoning()

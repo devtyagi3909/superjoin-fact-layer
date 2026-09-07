@@ -14,8 +14,14 @@ st.markdown(
     """
     <style>
     [data-testid="stAppViewContainer"] { background: #f7f8fa; }
+    [data-testid="stAppViewContainer"] .stMarkdown, [data-testid="stAppViewContainer"] .stCaption,
+    [data-testid="stAppViewContainer"] label, [data-testid="stAppViewContainer"] p,
+    [data-testid="stAppViewContainer"] [data-baseweb="tab-list"] button,
+    [data-testid="stAppViewContainer"] [data-baseweb="select"] * { color: #1f2937 !important; }
     [data-testid="stSidebar"] { background: #101827; }
     [data-testid="stSidebar"] * { color: #e7edf5; }
+    [data-testid="stSidebar"] input, [data-testid="stSidebar"] [data-baseweb="select"] > div { color: #111827 !important; background: #ffffff !important; }
+    [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color: #1f2937 !important; }
     .hero { padding: 1.5rem 0 1rem; }
     .eyebrow { color: #2563eb; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
     .hero h1 { color: #111827; font-size: 2.2rem; margin: .2rem 0; }
@@ -38,6 +44,8 @@ st.markdown(
     [data-theme="dark"] .hero p, [data-theme="dark"] .label-text,
     [data-theme="dark"] .relationship-text, [data-theme="dark"] .empty-state,
     [data-theme="dark"] .provider-status { color: #e7edf5; }
+    svg text { fill: #1f2937 !important; }
+    .stAlert p, .stAlert [data-testid="stMarkdownContainer"] { color: inherit !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -211,6 +219,10 @@ with st.sidebar:
         f'({html.escape(provider_state)})</div>',
         unsafe_allow_html=True,
     )
+    if provider_status.get("error"):
+        st.caption(provider_status["error"])
+    if provider_status.get("model"):
+        st.caption(f"Model: {provider_status['model']}")
     uploaded_files = st.file_uploader(
         "Choose one or more source documents", type=["pdf", "txt"], accept_multiple_files=True
     )
