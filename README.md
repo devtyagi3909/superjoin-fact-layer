@@ -14,10 +14,10 @@ This repository implements an evidence-first Fact Knowledge Layer built for IPO 
 
 ## Technical Architecture
 
-The pipeline organizes document reasoning into four decoupled layers, visualized below in an interactive 3D isometric plane architecture:
+The pipeline organizes document reasoning into four decoupled layers, visualized below across five decoupled subsystems:
 
 <p align="center">
-  <img src="assets/architecture_3d.svg" alt="3D Isometric Fact Knowledge Layer Architecture" width="100%" />
+  <img src="assets/architecture_diagram.svg" alt="3D Isometric Fact Knowledge Layer Architecture" width="100%" />
 </p>
 
 <details>
