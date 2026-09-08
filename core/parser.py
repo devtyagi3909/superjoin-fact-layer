@@ -316,26 +316,40 @@ class FactLayer:
         self.base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
         self.client = client if client is not None else self._build_client()
         self.config_warnings: list[str] = []
-        self.max_workers = self._safe_int("GEMINI_MAX_WORKERS", max_workers, 2, 1)
-        self.max_chunks = self._safe_int("GEMINI_MAX_CHUNKS", None, 8, 1)
-        self.max_retries = self._safe_int("GEMINI_MAX_RETRIES", None, 1, 0)
+        self.max_workers = self._safe_int(
+            "LLM_MAX_WORKERS", max_workers, 1, 1, aliases=("GEMINI_MAX_WORKERS",)
+        )
+        self.max_chunks = self._safe_int(
+            "LLM_MAX_PROVIDER_CALLS", None, 8, 1, aliases=("GEMINI_MAX_CHUNKS",)
+        )
+        self.max_retries = self._safe_int(
+            "LLM_MAX_RETRIES", None, 1, 0, aliases=("GEMINI_MAX_RETRIES",)
+        )
         self.max_retry_wait = self._safe_int(
-            "GEMINI_MAX_RETRY_WAIT_SECONDS", None, 8, 1
+            "LLM_MAX_RETRY_WAIT_SECONDS", None, 8, 1,
+            aliases=("GEMINI_MAX_RETRY_WAIT_SECONDS",),
         )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         # This is the complete prompt budget, including extraction instructions.
         # 20,000 chars is conservative for Groq free-tier context/request limits.
         self.max_input_chars = self._safe_int("LLM_MAX_INPUT_CHARS", None, 20000, 1000)
+        self.max_input_tokens = self._safe_int("LLM_MAX_INPUT_TOKENS", None, 5000, 256)
+        self.request_timeout_seconds = self._safe_int(
+            "LLM_REQUEST_TIMEOUT_SECONDS", None, 45, 5
+        )
         self._lock = threading.RLock()
         self._facts_version = 0
         self._reasoning_cache: tuple[int, dict] | None = None
         self._quota_cooldown_until = 0.0
 
     def _safe_int(
-        self, name: str, explicit: Optional[int], default: int, minimum: int
+        self, name: str, explicit: Optional[int], default: int, minimum: int,
+        aliases: tuple[str, ...] = (),
     ) -> int:
-        raw = explicit if explicit is not None else os.getenv(name, str(default))
+        raw = explicit if explicit is not None else os.getenv(name)
+        if raw is None:
+            raw = next((os.getenv(alias) for alias in aliases if os.getenv(alias) is not None), str(default))
         try:
             value = int(raw)
         except (TypeError, ValueError):
@@ -394,6 +408,8 @@ class FactLayer:
             "max_workers": self.max_workers,
             "max_input_chars": self.max_input_chars,
             "effective_max_input_chars": self.max_input_chars,
+            "max_input_tokens": self.max_input_tokens,
+            "request_timeout_seconds": self.request_timeout_seconds,
             "max_retries": self.max_retries,
             "max_retry_wait_seconds": self.max_retry_wait,
             "config_warnings": list(self.config_warnings),
@@ -481,7 +497,8 @@ Page markers are authoritative:
 
     def _provider_input_budget(self) -> int:
         suffix_length = len("\n")
-        return max(1, self.max_input_chars - len(self._extraction_prompt_prefix()) - suffix_length)
+        char_budget = max(1, self.max_input_chars - len(self._extraction_prompt_prefix()) - suffix_length)
+        return max(1, min(char_budget, self.max_input_tokens * 4))
 
     def _prepare_provider_chunks(self, source_chunks: list[str]) -> list[str]:
         """Split oversized source chunks, then group adjacent text without dropping it."""
@@ -543,12 +560,16 @@ Page markers are authoritative:
                     "temperature": 0.1,
                 }
                 try:
-                    response = self.client.chat.completions.create(**request)
+                    response = self.client.chat.completions.create(
+                        **request, timeout=self.request_timeout_seconds
+                    )
                 except Exception as exc:
                     if classify_provider_error(exc, self.provider)["code"] != "provider_structured_output":
                         raise
                     request.pop("response_format")
-                    response = self.client.chat.completions.create(**request)
+                    response = self.client.chat.completions.create(
+                        **request, timeout=self.request_timeout_seconds
+                    )
                 content = response.choices[0].message.content
                 if isinstance(content, list):
                     content = "".join(
@@ -592,6 +613,32 @@ Page markers are authoritative:
 
     def reset_quota_cooldown(self) -> None:
         self._quota_cooldown_until = 0.0
+
+    def provider_smoke_test(self) -> dict:
+        """Make one tiny JSON-only call and return safe readiness diagnostics."""
+        status = self.provider_status()
+        if not status["configured"]:
+            return {
+                "status": "not_ready",
+                "provider": self.provider,
+                "model": self.model,
+                "error": status["error"] or "Provider is not configured.",
+            }
+        try:
+            response = self._generate_content(
+                'Return exactly this JSON object and nothing else: {"ok":true}',
+                dict,
+            )
+            if self._parse_json(response.text) != {"ok": True}:
+                raise ValueError("Provider returned an unexpected smoke-test response.")
+            return {"status": "ready", "provider": self.provider, "model": self.model}
+        except Exception as exc:
+            return {
+                "status": "not_ready",
+                "provider": self.provider,
+                "model": self.model,
+                "error": self._error_with_context(exc),
+            }
 
     def _extract_chunk(self, chunk: str) -> dict:
         prompt = f"{self._extraction_prompt_prefix()}\n{chunk}\n"
