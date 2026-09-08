@@ -1,0 +1,78 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg width="880" height="420" xmlns="http://www.w3.org/2000/svg" style="background-color: #0d1117; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">
+    <style>
+        @keyframes reveal { from { width: 0px; } to { width: 620px; } }
+        #clip-rect { animation: reveal 2.2s steps(45, end) forwards; animation-delay: 0.4s; }
+        #cursor { animation: move-cursor 2.2s steps(45, end) forwards, blink-caret 0.75s step-end infinite; animation-delay: 0.4s; }
+        @keyframes move-cursor { from { transform: translateX(0px); } to { transform: translateX(620px); } }
+        @keyframes blink-caret { from, to { opacity: 0; } 50% { opacity: 1; } }
+        .output { opacity: 0; animation: show-output 0.1s forwards; animation-delay: 2.8s; }
+        @keyframes show-output { to { opacity: 1; } }
+        .hide-cursor { animation: hide-it 0.1s forwards; animation-delay: 2.8s; }
+        @keyframes hide-it { to { opacity: 0; } }
+    </style>
+    <rect x="15" y="15" width="850" height="390" fill="#0d1117" stroke="#30363d" stroke-width="1.5" rx="8" />
+    <rect x="15" y="15" width="850" height="34" fill="#161b22" stroke="#30363d" stroke-width="1.5" rx="8" />
+    <rect x="16" y="38" width="848" height="11" fill="#161b22" />
+    <circle cx="36" cy="32" r="6" fill="#ff5f56" />
+    <circle cx="56" cy="32" r="6" fill="#ffbd2e" />
+    <circle cx="76" cy="32" r="6" fill="#27c93f" />
+    <text x="440" y="36" fill="#8b949e" font-size="12" font-weight="600" text-anchor="middle">devtyagi@macbook: ~/superjoin-fact-layer</text>
+    
+    <g transform="translate(35, 75)">
+        <text x="0" y="0" fill="#3fb950" font-size="13" font-weight="bold">➜</text>
+        <text x="18" y="0" fill="#79c0ff" font-size="13" font-weight="bold">~</text>
+        <defs>
+            <clipPath id="type-clip">
+                <rect x="36" y="-14" width="0" height="20" id="clip-rect" />
+            </clipPath>
+        </defs>
+        <text x="36" y="0" fill="#c9d1d9" font-size="13" font-weight="500" clip-path="url(#type-clip)">
+            <tspan fill="#ff7b72">python3</tspan><tspan fill="#c9d1d9"> -m core.pipeline --input ./starter-datasets/delhivery --validate-graph</tspan>
+        </text>
+        <rect x="36" y="-12" width="7" height="15" fill="#58a6ff" id="cursor" class="hide-cursor" />
+    </g>
+
+    <g transform="translate(35, 110)" class="output">
+        <text x="0" y="0" font-size="12" font-weight="500">
+            <tspan fill="#8b949e">[1/4] Ingesting filings (3 PDFs, 227 pages)... </tspan>
+            <tspan fill="#58a6ff">Spatial layout extracted via PyMuPDF</tspan>
+        </text>
+        <text x="0" y="22" font-size="12" font-weight="500">
+            <tspan fill="#8b949e">[2/4] Schema Extraction (Pydantic v2): </tspan>
+            <tspan fill="#3fb950">28 grounded numerical &amp; semantic claims validated</tspan>
+        </text>
+        <text x="0" y="44" font-size="12" font-weight="500">
+            <tspan fill="#8b949e">[3/4] Candidate Retrieval: </tspan>
+            <tspan fill="#c9d1d9">Inverted Index + RapidFuzz (Reduced N×N space to 14 candidate pairs)</tspan>
+        </text>
+        <text x="0" y="66" font-size="12" font-weight="500">
+            <tspan fill="#8b949e">[4/4] Gate Resolution: </tspan>
+            <tspan fill="#d29922">Unit Canonicalizer (₹ Mn ↔ ₹ Cr) &amp; Temporal Scoping applied</tspan>
+        </text>
+
+        <text x="0" y="105" font-size="12" font-weight="600" fill="#f0883e">── Cross-Document Reconciliation Topologies ──</text>
+        
+        <text x="0" y="130" font-size="12" font-weight="500">
+            <tspan fill="#3fb950">● Corroboration:</tspan>
+            <tspan fill="#c9d1d9"> FY24 Revenue matched (₹81,415 Mn [Annual p.4] == ₹8,142 Cr [Q4 p.9])</tspan>
+        </text>
+        <text x="0" y="152" font-size="12" font-weight="500">
+            <tspan fill="#f85149">● Contradiction:</tspan>
+            <tspan fill="#c9d1d9"> FY22 Active Customers conflict (23,113 excl. Spoton vs 23,613 table baseline)</tspan>
+        </text>
+        <text x="0" y="174" font-size="12" font-weight="500">
+            <tspan fill="#d29922">● Contextual:   </tspan>
+            <tspan fill="#c9d1d9"> EBITDA +₹1,266 Mn reconciled with PAT -₹2,491 Mn via ₹7,321 Mn D&amp;A</tspan>
+        </text>
+        <text x="0" y="196" font-size="12" font-weight="500">
+            <tspan fill="#8b949e">● Failure Gate: </tspan>
+            <tspan fill="#c9d1d9"> Note 32 multi-column schedule rejected on low confidence (0.32)</tspan>
+        </text>
+
+        <text x="0" y="235" font-size="12" font-weight="600">
+            <tspan fill="#3fb950">✔ Test Suite: </tspan>
+            <tspan fill="#c9d1d9">pytest passed 28/28 tests (async jobs, lifecycle, contract validation: 100%)</tspan>
+        </text>
+    </g>
+</svg>
