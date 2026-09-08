@@ -180,7 +180,7 @@ async def source_preview(
 ):
     path = _source_path(document_name)
     if path.suffix.lower() == ".pdf":
-        import fitz
+        import pymupdf as fitz
 
         with fitz.open(path) as document:
             if page > len(document):

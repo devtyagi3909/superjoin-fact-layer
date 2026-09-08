@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, List, Optional
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 try:
     from google import genai
     from google.genai import types
@@ -401,7 +401,7 @@ class FactLayer:
     def model(self):
         if self.provider == "openai_compatible":
             return os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-        return os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        return os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     @property
     def base_url(self):
