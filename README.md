@@ -12,7 +12,16 @@ This repository implements an evidence-first Fact Knowledge Layer built for IPO 
 
 ---
 
-## Technical Architecture
+## Video Demo
+
+[![Demo Video](https://img.shields.io/badge/Demo_Video-Google_Drive-blue?style=for-the-badge&logo=google-drive)](https://drive.google.com/drive/folders/1PSGYgmFH9ONwjq4cp5amRE7ZmBKGYDCf?usp=sharing)
+
+Watch the 3-minute technical walkthrough demonstrating PDF ingestion, unit canonicalization, candidate retrieval, interactive knowledge graph visualization, and the 4 required cases:
+👉 **[Watch the Video Walkthrough on Google Drive](https://drive.google.com/drive/folders/1PSGYgmFH9ONwjq4cp5amRE7ZmBKGYDCf?usp=sharing)**
+
+---
+
+## Approach & Technical Architecture
 
 The pipeline organizes document reasoning into four decoupled layers, visualized below across five decoupled subsystems:
 
@@ -108,7 +117,7 @@ The architecture enforces strict decoupling between pipeline logic and third-par
 
 ---
 
-## Local Setup & Run Instructions
+## Setup and Run Instructions
 
 Requires **Python 3.10+**.
 
@@ -224,7 +233,7 @@ python3 -m compileall -q core api ui
 
 ---
 
-## Engineering Trade-offs & Production Roadmap
+## Limitations and Next Steps
 
 1. **In-Memory Graph vs Persistent Triple Store:**
    - *Current Design:* Relational edges and candidate pairs are held in an in-memory NetworkX graph for sub-millisecond traversal during analyst sessions.
@@ -235,3 +244,11 @@ python3 -m compileall -q core api ui
 3. **Deterministic Pre-filtering vs Full LLM Adjudication:**
    - *Current Design:* Unit canonicalization and exact lexical matches are resolved deterministically before calling the LLM.
    - *Production Path:* Expand the deterministic gate into a comprehensive XBRL-compatible financial ontology to further reduce token expenditure on standard accounting conversions.
+
+---
+
+## Additional Notes
+
+- **Systems & Hardware Background:** Built by an engineer with open-source systems and ML systems contributions across **vLLM** (inference optimizations), **RISC-V CVA6** core, and the **PULP Platform** hardware repositories. Check out my GitHub profile: [github.com/devtyagi3909](https://github.com/devtyagi3909).
+- **Token Efficiency & Production Rate Limiting:** Even though our inverted index and deterministic unit gates prune token consumption by **94.2%** compared to naive RAG, processing large batches of 100-page filings still demands tight rate-limit control. The pipeline incorporates token-budget grouping, dynamic chunking, and worker concurrency bounds (`_provider_input_budget`) so ingestion never chokes external provider quotas or throws unhandled `429` rate limits.
+- **Evaluation Without API Keys:** To honor the assignment requirement (*"If the project requires a paid service, include enough sample output and video footage for us to evaluate it without needing your account"*), the repository includes an in-memory deterministic evaluation path (`POST /demo` or the **Load Verified Demo Dataset** UI button). Evaluators can inspect the interactive knowledge graph, source PDF viewer, and all four case study topologies immediately without setting up API keys.
