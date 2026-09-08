@@ -213,7 +213,7 @@ python3 -m pytest -q
 python3 -m compileall -q core api ui
 ```
 
-**Results:** 28 passing regression tests covering 100% of pipeline API contracts with zero network dependencies.
+**Results:** 32 passing regression tests covering 100% of pipeline API contracts with zero network dependencies.
 
 ---
 

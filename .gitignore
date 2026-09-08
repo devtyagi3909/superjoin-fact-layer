@@ -29,3 +29,5 @@ fake_demo_log.txt
 
 # Local Recording Sandbox (Kept local, never committed)
 fake_demo.py
+test_genai.py
+test_parser.py
