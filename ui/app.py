@@ -13,30 +13,58 @@ API_URL = "http://localhost:8000"
 st.markdown(
     """
     <style>
-    .case-card {
-        border: 1px solid rgba(128, 128, 128, 0.2);
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 0.75rem;
+    :root { color-scheme: light; }
+    [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stMainBlockContainer"] {
+        background: #f7f8fa !important;
+        color: #111827 !important;
     }
-    .evidence {
-        border-left: 3px solid #2563eb;
-        background: rgba(37, 99, 235, 0.05);
-        padding: 0.75rem 1rem;
-        margin: 0.5rem 0;
-        border-radius: 0 6px 6px 0;
+    [data-testid="stAppViewContainer"] *,
+    [data-testid="stMain"] *,
+    [data-testid="stMainBlockContainer"] * { border-color: #d0d5dd; }
+    [data-testid="stMain"] .stMarkdown p,
+    [data-testid="stMain"] .stMarkdown li,
+    [data-testid="stMain"] .stMarkdown strong,
+    [data-testid="stMain"] .stMarkdown em,
+    [data-testid="stMain"] h1, [data-testid="stMain"] h2,
+    [data-testid="stMain"] h3, [data-testid="stMain"] h4,
+    [data-testid="stMain"] label, [data-testid="stMain"] [data-testid="stCaptionContainer"],
+    [data-testid="stMain"] [data-testid="stWidgetLabel"],
+    [data-testid="stMain"] [data-baseweb="tab-list"] button,
+    [data-testid="stMain"] [data-baseweb="tab-panel"],
+    [data-testid="stMain"] [data-testid="stExpander"] summary,
+    [data-testid="stMain"] [data-testid="stExpander"] summary p,
+    [data-testid="stMain"] [data-baseweb="select"] *,
+    [data-testid="stMain"] [data-testid="stProgress"] * { color: #111827 !important; }
+    [data-testid="stMain"] [data-baseweb="select"] > div,
+    [data-testid="stMain"] input, [data-testid="stMain"] textarea {
+        color: #111827 !important; background: #ffffff !important;
     }
-    .relationship-card {
-        border: 1px solid rgba(128, 128, 128, 0.2);
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
-    .provider-status {
-        padding: 0.5rem 0;
-        font-size: 0.85rem;
-    }
-
+    [data-testid="stMain"] button p, [data-testid="stMain"] button span { color: inherit !important; }
+    [data-testid="stSidebar"] { background: #101827 !important; color: #f9fafb !important; }
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color: #f9fafb !important; }
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] [data-baseweb="select"] > div { color: #111827 !important; background: #ffffff !important; }
+    [data-testid="stSidebar"] button p, [data-testid="stSidebar"] button span { color: inherit !important; }
+    [data-testid="stExpander"] summary { color: #111827 !important; }
+    .hero { padding: 1.5rem 0 1rem; }
+    .eyebrow { color: #2563eb; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .hero h1 { color: #111827; font-size: 2.2rem; margin: .2rem 0; }
+    .hero p { color: #111827; font-size: 1.05rem; }
+    .case-card { background: white; border: 1px solid #e4e7ec; border-radius: 12px; padding: 1rem; min-height: 130px; }
+    .case-card h3 { margin: 0; color: #111827; font-size: 1rem; }
+    .case-card p { color: #111827; font-size: .9rem; }
+    .kpi { background: #ffffff; border: 1px solid #e4e7ec; border-radius: 12px; padding: .8rem 1rem; }
+    .kpi-value { color: #111827; font-size: 1.45rem; font-weight: 750; }
+    .kpi-label { color: #475467; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
+    .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #111827; }
+    .label-text, .relationship-text, .empty-state, .provider-status { color: var(--text-color, #1f2937); }
+    .evidence strong, .evidence em { color: #111827; }
+    svg text { fill: #111827 !important; }
+    .stAlert p, .stAlert [data-testid="stMarkdownContainer"] { color: inherit !important; }
     </style>
     """,
     unsafe_allow_html=True,
