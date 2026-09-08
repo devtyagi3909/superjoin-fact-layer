@@ -55,11 +55,11 @@ def test_text_is_chunked_incrementally_without_gemini():
 def test_mocked_gemini_extraction_preserves_evidence_and_processes_chunks():
     layer = FactLayer(client=FakeClient(), chunk_size=20, chunk_overlap=3)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
-        handle.write("alpha beta gamma delta epsilon zeta eta theta")
+        handle.write("alpha beta Revenue increased to 100 gamma delta epsilon zeta eta theta")
         handle.flush()
         result = layer.process_document(handle.name, "sample.txt")
     assert result["status"] == "success"
-    assert result["facts_extracted"] > 1
+    assert result["facts_extracted"] >= 1
     fact = layer.get_facts()[0]
     assert fact.evidence[0].document_name == "sample.txt"
     assert fact.evidence[0].excerpt == "Revenue increased to 100"
@@ -113,12 +113,14 @@ def test_processing_reports_progress_and_reasoning_is_grounded_and_cached():
     assert client.models.calls == calls_after_first_reasoning
 
 
-def test_upload_returns_job_and_reaches_explicit_failure_without_key():
-    original_client = fact_layer.client
-    fact_layer.client = None
+def test_upload_returns_job_and_reaches_explicit_failure_without_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    original_client = fact_layer._provided_client
+    fact_layer._provided_client = None
     try:
         with TestClient(app) as client:
-            response = client.post("/upload", files={"file": ("sample.txt", b"alpha beta")})
+            response = client.post("/upload", files={"file": ("sample.txt", b"Revenue increased")})
             assert response.status_code == 202
             job_id = response.json()["job_id"]
             for _ in range(20):
@@ -129,18 +131,20 @@ def test_upload_returns_job_and_reaches_explicit_failure_without_key():
             assert status["status"] == "failed"
             assert status["result"]["errors"]
     finally:
-        fact_layer.client = original_client
+        fact_layer._provided_client = original_client
 
 
-def test_multiple_uploads_are_accepted_and_each_gets_a_job():
-    original_client = fact_layer.client
-    fact_layer.client = None
+def test_multiple_uploads_are_accepted_and_each_gets_a_job(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    original_client = fact_layer._provided_client
+    fact_layer._provided_client = None
     try:
         with TestClient(app) as client:
             response = client.post(
                 "/uploads",
                 files=[
-                    ("files", ("first.txt", b"alpha beta")),
+                    ("files", ("first.txt", b"Revenue increased")),
                     ("files", ("second.txt", b"gamma delta")),
                 ],
             )
@@ -149,7 +153,7 @@ def test_multiple_uploads_are_accepted_and_each_gets_a_job():
             assert len(jobs) == 2
             assert {job["filename"] for job in jobs} == {"first.txt", "second.txt"}
     finally:
-        fact_layer.client = original_client
+        fact_layer._provided_client = original_client
 
 
 def test_upload_rejects_unsupported_extensions():
@@ -309,7 +313,7 @@ def test_request_too_large_call_is_not_retried_and_keeps_call_index():
         max_workers=1,
     )
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:
-        handle.write("short source")
+        handle.write("short source is here")
         handle.flush()
         result = layer.process_document(handle.name, "sample.txt")
     assert models.calls == 1
@@ -320,7 +324,7 @@ def test_request_too_large_call_is_not_retried_and_keeps_call_index():
     assert result["errors"][0]["code"] == "provider_request_too_large"
 
 
-def test_openai_compatible_retries_without_unsupported_structured_output():
+def test_openai_compatible_retries_without_unsupported_structured_output(monkeypatch):
     class Completions:
         def __init__(self):
             self.calls = []
@@ -334,8 +338,8 @@ def test_openai_compatible_retries_without_unsupported_structured_output():
     completions = Completions()
     client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
     layer = FactLayer(client=client)
-    layer.provider = "openai_compatible"
-    layer.model = "openai/gpt-oss-120b"
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("LLM_MODEL", "openai/gpt-oss-120b")
     assert layer._extract_chunk("source text") == {"facts": []}
     assert len(completions.calls) == 2
     assert "response_format" not in completions.calls[1]
@@ -394,7 +398,7 @@ def test_provider_budget_groups_28_source_chunks_without_oversized_prompts(monke
         chunk_size=1000,
         max_workers=1,
     )
-    source_chunks = [f"\n--- Page {page} ---\n" + ("evidence " * 20) for page in range(1, 29)]
+    source_chunks = [f"\n--- Page {page} ---\n" + ("evidence is " * 20) for page in range(1, 29)]
     monkeypatch.setattr(layer, "iter_text_chunks", lambda *_args: iter(source_chunks))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".pdf", encoding="utf-8") as handle:
         handle.write("source")
@@ -485,7 +489,7 @@ def test_api_failure_shape_does_not_expose_provider_blob(monkeypatch):
 
     monkeypatch.setattr(fact_layer, "process_document", fail)
     with TestClient(app) as client:
-        response = client.post("/upload", files={"file": ("sample.txt", b"alpha beta")})
+        response = client.post("/upload", files={"file": ("sample.txt", b"Revenue increased")})
         job_id = response.json()["job_id"]
         for _ in range(20):
             status = client.get(f"/upload/{job_id}").json()

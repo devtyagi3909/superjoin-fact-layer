@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 streamlit
-llama-index
 pydantic
 python-multipart
 pytest
@@ -10,3 +9,7 @@ google-genai
 requests
 pandas
 openai
+spacy
+rapidfuzz
+sentence-transformers
+python-dotenv

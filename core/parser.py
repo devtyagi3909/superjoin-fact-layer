@@ -5,6 +5,37 @@ import re
 import time
 import threading
 import uuid
+
+import spacy
+from rapidfuzz import fuzz
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
+
+_embedder = None
+def get_embedder():
+    global _embedder
+    if _embedder is None and SentenceTransformer is not None:
+        try:
+            _embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        except Exception:
+            pass
+    return _embedder
+
+_nlp = None
+def get_nlp():
+    global _nlp
+    if _nlp is None:
+        try:
+            _nlp = spacy.load("en_core_web_sm")
+        except Exception:
+            pass
+    return _nlp
+
+
+CURATED_VERBS = {"is", "was", "were", "appointed", "resigned", "increased", "decreased", "merged", "renamed", "located", "reported", "grew"}
+TARGET_ENTS = {"MONEY", "PERCENT", "DATE", "CARDINAL", "ORG", "PERSON", "GPE"}
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
@@ -311,10 +342,7 @@ class FactLayer:
     ):
         self.facts: List[Fact] = []
         self.extraction_failures: list[dict] = []
-        self.provider = os.getenv("LLM_PROVIDER", "gemini" if os.getenv("GEMINI_API_KEY") else "openai_compatible" if os.getenv("LLM_API_KEY") else "gemini").lower()
-        self.model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        self.base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
-        self.client = client if client is not None else self._build_client()
+        self._provided_client = client
         self.config_warnings: list[str] = []
         self.max_workers = self._safe_int(
             "LLM_MAX_WORKERS", max_workers, 1, 1, aliases=("GEMINI_MAX_WORKERS",)
@@ -364,6 +392,26 @@ class FactLayer:
             self.config_warnings.append(warning)
             logger.warning(warning)
         return value
+
+    @property
+    def provider(self):
+        return os.getenv("LLM_PROVIDER", "gemini" if os.getenv("GEMINI_API_KEY") else "openai_compatible" if os.getenv("LLM_API_KEY") else "gemini").lower()
+
+    @property
+    def model(self):
+        if self.provider == "openai_compatible":
+            return os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+        return os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+
+    @property
+    def base_url(self):
+        return os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+
+    @property
+    def client(self):
+        if self._provided_client is not None:
+            return self._provided_client
+        return self._build_client()
 
     def _build_client(self) -> Any:
         if self.provider == "gemini":
@@ -711,81 +759,171 @@ Page markers are authoritative:
                 "facts_extracted": 0,
                 "errors": ["No extractable text found"],
             }
-        try:
-            chunks = self._prepare_provider_chunks(source_chunks)
-        except Exception as exc:
-            error = self._error_with_context(exc, chunk_index=0, chunk_total=0)
-            return {
-                "status": "failed",
-                "message": f"Unable to fit {filename} within the provider request budget.",
-                "facts_extracted": 0,
-                "errors": [error],
-                "chunks_total": 0,
-                "source_chunks_total": len(source_chunks),
-                "provider_calls_total": 0,
-                "provider_calls_succeeded": 0,
-                "provider_calls_failed": 0,
-                "failed_provider_calls": [],
-                "quota": None,
-            }
-        total_chunks = len(chunks)
 
-        def extract(index_and_chunk):
-            index, chunk = index_and_chunk
-            try:
-                data = self._extract_chunk(chunk)
-                new_facts = []
-                for item in data.get("facts", []):
-                    failure = _evidence_failure(item, chunk)
-                    if failure:
-                        extraction_failures.append(
-                            {
-                                "type": "extraction_failure",
-                                "description": failure,
-                                "document_name": filename,
-                                "page": item.get("page"),
-                                "claim": item.get("text"),
-                            }
-                        )
+        # Stage 1-3: Segment, Candidate detection, Structure into Facts
+        leftover_candidates = []
+        local_facts = []
+
+        for chunk_idx, chunk in enumerate(source_chunks):
+            nlp = get_nlp()
+            if nlp is not None:
+                doc = nlp(chunk)
+                for sent_id, sent in enumerate(doc.sents):
+                    text = sent.text.strip()
+                    if not text:
                         continue
-                    text = str(item.get("text") or "").strip()
-                    value = item.get("value")
-                    new_facts.append(
-                        Fact(
-                            id=str(uuid.uuid4()),
-                            text=text,
-                            value=value,
-                            evidence=[
-                                FactEvidence(
-                                    document_name=filename,
-                                    page=item.get("page"),
-                                    excerpt=item.get("excerpt", ""),
-                                )
-                            ],
-                            **_metadata_for_claim(item, text, value),
-                        )
-                    )
-                return index, new_facts, None
-            except Exception as exc:
-                return index, [], self._error_with_context(
-                    exc, chunk_index=index, chunk_total=total_chunks
-                )
+                    
+                    page = None
+                    markers = list(re.finditer(r"---\s*Page\s+(\d+)\s*---", chunk, flags=re.I))
+                    for m in markers:
+                        if m.start() <= sent.start_char:
+                            page = int(m.group(1))
+                        else:
+                            break
+                    
+                    ents = [ent.label_ for ent in sent.ents]
+                    has_target_ent = any(ent in TARGET_ENTS for ent in ents)
+                    has_verb = any(token.lemma_.lower() in CURATED_VERBS or token.text.lower() in CURATED_VERBS for token in sent)
+                    has_svo = any(token.dep_ == "nsubj" for token in sent) and any(token.pos_ == "VERB" for token in sent)
+                    
+                    if has_target_ent or has_verb or has_svo:
+                        match = re.search(r"(?i)^(revenue|net income|profit|sales|expenses)\s+(?:was|is|were|grew to)\s+([\$\d\.,A-Za-z]+)\s+in\s+([A-Za-z0-9]+)\.?$", text)
+                        if match:
+                            attribute, value, period = match.groups()
+                            local_facts.append({
+                                "text": text,
+                                "value": value,
+                                "excerpt": text,
+                                "page": page,
+                                "subject": attribute,
+                                "predicate": "was",
+                                "raw_value": value,
+                                "time_expression": period,
+                                "confidence": 1.0,
+                            })
+                        else:
+                            leftover_candidates.append({
+                                "sentence_id": sent_id,
+                                "char_span": [sent.start_char, sent.end_char],
+                                "raw_text": text,
+                                "page": page
+                            })
+            else:
+                leftover_candidates.append({
+                    "sentence_id": 0,
+                    "char_span": [0, len(chunk)],
+                    "raw_text": chunk,
+                    "page": 1
+                })
 
-        with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
-            futures = [executor.submit(extract, item) for item in enumerate(chunks)]
-            for completed, future in enumerate(as_completed(futures), start=1):
-                _, new_facts, error = future.result()
-                with self._lock:
-                    self.facts.extend(new_facts)
-                    self._facts_version += len(new_facts)
-                    self._reasoning_cache = None
-                extracted += len(new_facts)
-                if error:
-                    errors.append(error)
+        # Save local facts immediately
+        new_facts = []
+        for item in local_facts:
+            text = str(item.get("text") or "").strip()
+            value = item.get("value")
+            new_facts.append(
+                Fact(
+                    id=str(uuid.uuid4()),
+                    text=text,
+                    value=value,
+                    evidence=[
+                        FactEvidence(
+                            document_name=filename,
+                            page=item.get("page"),
+                            excerpt=item.get("excerpt", ""),
+                        )
+                    ],
+                    **_metadata_for_claim(item, text, value),
+                )
+            )
+        
+        with self._lock:
+            self.facts.extend(new_facts)
+            self._facts_version += len(new_facts)
+            self._reasoning_cache = None
+        extracted += len(new_facts)
+
+        # Process leftover candidates with LLM
+        provider_calls_total = 0
+        if leftover_candidates:
+            # Batch them into chunks that fit in the prompt budget
+            budget = self._provider_input_budget()
+            candidate_chunks = []
+            current_chunk = []
+            current_len = 0
+            
+            import json
+            for candidate in leftover_candidates:
+                c_str = json.dumps({"page": candidate["page"], "raw_text": candidate["raw_text"]})
+                if current_len + len(c_str) > budget and current_chunk:
+                    candidate_chunks.append("\n".join(current_chunk))
+                    current_chunk = [c_str]
+                    current_len = len(c_str)
                 else:
-                    successful_calls += 1
-                if progress_callback:
-                    progress_callback(completed, total_chunks)
+                    current_chunk.append(c_str)
+                    current_len += len(c_str)
+            if current_chunk:
+                candidate_chunks.append("\n".join(current_chunk))
+                
+            provider_calls_total = len(candidate_chunks)
+            
+            def extract(index_and_chunk):
+                index, chunk = index_and_chunk
+                try:
+                    data = self._extract_chunk(chunk)
+                    batch_facts = []
+                    for item in data.get("facts", []):
+                        failure = _evidence_failure(item, chunk)
+                        if failure:
+                            extraction_failures.append(
+                                {
+                                    "type": "extraction_failure",
+                                    "description": failure,
+                                    "document_name": filename,
+                                    "page": item.get("page"),
+                                    "claim": item.get("text"),
+                                }
+                            )
+                            continue
+                        text = str(item.get("text") or "").strip()
+                        value = item.get("value")
+                        batch_facts.append(
+                            Fact(
+                                id=str(uuid.uuid4()),
+                                text=text,
+                                value=value,
+                                evidence=[
+                                    FactEvidence(
+                                        document_name=filename,
+                                        page=item.get("page"),
+                                        excerpt=item.get("excerpt", ""),
+                                    )
+                                ],
+                                **_metadata_for_claim(item, text, value),
+                            )
+                        )
+                    return index, batch_facts, None
+                except Exception as exc:
+                    return index, [], self._error_with_context(
+                        exc, chunk_index=index, chunk_total=provider_calls_total
+                    )
+
+            with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as executor:
+                futures = [executor.submit(extract, item) for item in enumerate(candidate_chunks)]
+                for completed, future in enumerate(as_completed(futures), start=1):
+                    _, batch_facts, error = future.result()
+                    with self._lock:
+                        self.facts.extend(batch_facts)
+                        self._facts_version += len(batch_facts)
+                        self._reasoning_cache = None
+                    extracted += len(batch_facts)
+                    if error:
+                        errors.append(error)
+                    else:
+                        successful_calls += 1
+                    if progress_callback:
+                        progress_callback(completed, provider_calls_total)
+
         with self._lock:
             self.extraction_failures.extend(extraction_failures)
         if not extracted and (errors or extraction_failures):
@@ -800,9 +938,9 @@ Page markers are authoritative:
             "facts_extracted": extracted,
             "errors": errors,
             "extraction_failures": extraction_failures,
-            "chunks_total": total_chunks,
+            "chunks_total": provider_calls_total,
             "source_chunks_total": len(source_chunks),
-            "provider_calls_total": total_chunks,
+            "provider_calls_total": provider_calls_total,
             "provider_calls_succeeded": successful_calls,
             "provider_calls_failed": len(errors),
             "failed_provider_calls": [
@@ -920,24 +1058,56 @@ Page markers are authoritative:
     @staticmethod
     def _tokens(text: str) -> set[str]:
         return set(re.findall(r"[a-z0-9]{2,}", text.lower()))
-
+        
     def retrieve_related_facts(self, facts: List[Fact], top_k: int = 5) -> list[tuple[Fact, Fact]]:
-        """Use an inverted lexical index, avoiding an all-pairs comparison."""
-        index: dict[str, set[int]] = defaultdict(set)
-        tokens = []
-        for i, fact in enumerate(facts):
-            fact_tokens = FactLayer._tokens(
-                f"{fact.text} {fact.value or ''} {fact.subject or ''} "
-                f"{fact.predicate or ''} {fact.normalized_value or ''}"
-            )
-            tokens.append(fact_tokens)
-            for token in fact_tokens:
-                index[token].add(i)
-        pairs: set[tuple[int, int]] = set()
-        for i, fact_tokens in enumerate(tokens):
-            candidates = Counter(j for token in fact_tokens for j in index[token] if j != i)
-            for j, _ in candidates.most_common(top_k):
-                pairs.add(tuple(sorted((i, j))))
+        # Stage 4: Canonicalize
+        # Normalize unit table
+        unit_map = {
+            "$": "usd", "₹": "inr", "%": "%", "k": "thousand", "m": "million", 
+            "b": "billion", "lakh": "100k", "crore": "10m",
+            "lakhs": "100k", "crores": "10m"
+        }
+        for fact in facts:
+            if fact.normalized_unit:
+                fact.normalized_unit = unit_map.get(fact.normalized_unit.lower(), fact.normalized_unit.lower())
+            
+        pairs = set()
+        
+        # We need to find pairs of facts that are about the same entity and attribute.
+        # Since 'subject' is attribute, and entity might be extracted in 'text' or 'subject'
+        # We will use RapidFuzz for string similarity and embedder for semantic similarity.
+        
+        # Precompute embeddings for subjects
+        subjects = [f.subject or f.text for f in facts]
+        embeddings = None
+        embedder = get_embedder()
+        if embedder is not None and subjects:
+            embeddings = embedder.encode(subjects)
+            
+        for i in range(len(facts)):
+            for j in range(i + 1, len(facts)):
+                # RapidFuzz for entity/text similarity
+                fuzz_score = fuzz.ratio((facts[i].subject or facts[i].text).lower(), (facts[j].subject or facts[j].text).lower())
+                
+                # SentenceTransformer for attribute similarity
+                cosine_sim = 0
+                if embeddings is not None:
+                    # dot product of l2 normalized vectors is cosine sim
+                    from numpy import dot
+                    from numpy.linalg import norm
+                    vec1 = embeddings[i]
+                    vec2 = embeddings[j]
+                    if norm(vec1) > 0 and norm(vec2) > 0:
+                        cosine_sim = dot(vec1, vec2) / (norm(vec1) * norm(vec2))
+                
+                score = max(fuzz_score / 100.0, cosine_sim)
+                if score >= 0.85:
+                    pairs.add(tuple(sorted((i, j))))
+                elif score >= 0.75:
+                    # Borderline match, LLM check needed
+                    # We will mark it by adding it to pairs, and the gate will handle it
+                    pairs.add(tuple(sorted((i, j))))
+                    
         return [(facts[i], facts[j]) for i, j in pairs]
 
     @staticmethod
