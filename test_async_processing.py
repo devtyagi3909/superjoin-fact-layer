@@ -179,6 +179,27 @@ def test_provider_selection_supports_openai_compatible_environment(monkeypatch):
     assert status["error"] in (None, "openai SDK is not installed. Install requirements.txt.")
 
 
+def test_provider_budget_defaults_are_sequential_and_smoke_test_is_safe(monkeypatch):
+    for name in (
+        "LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
+        "LLM_MAX_WORKERS", "LLM_MAX_PROVIDER_CALLS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    layer = FactLayer(client=None)
+    assert layer.max_workers == 1
+    assert layer.max_chunks == 8
+    result = layer.provider_smoke_test()
+    assert result["status"] == "not_ready"
+    assert "test-key" not in json.dumps(result).lower()
+
+
+def test_provider_smoke_endpoint_never_returns_credentials():
+    with TestClient(app) as client:
+        response = client.post("/provider-smoke-test")
+    assert response.status_code == 200
+    assert "LLM_API_KEY" not in response.text
+
+
 def test_empty_document_is_reported_as_failed_instead_of_success():
     layer = FactLayer(client=None)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", encoding="utf-8") as handle:

@@ -57,6 +57,9 @@ st.markdown(
     .case-card { background: white; border: 1px solid #e4e7ec; border-radius: 12px; padding: 1rem; min-height: 130px; }
     .case-card h3 { margin: 0; color: #111827; font-size: 1rem; }
     .case-card p { color: #111827; font-size: .9rem; }
+    .kpi { background: #ffffff; border: 1px solid #e4e7ec; border-radius: 12px; padding: .8rem 1rem; }
+    .kpi-value { color: #111827; font-size: 1.45rem; font-weight: 750; }
+    .kpi-label { color: #475467; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
     .evidence { border-left: 3px solid #2563eb; background: #f8fafc; padding: .7rem .9rem; margin: .5rem 0; color: #111827; }
     .label-text, .relationship-text, .empty-state, .provider-status { color: var(--text-color, #1f2937); }
     .evidence strong, .evidence em { color: #111827; }
@@ -272,6 +275,16 @@ with st.sidebar:
         st.caption(provider_status["error"])
     if provider_status.get("model"):
         st.caption(f"Model: {provider_status['model']}")
+    if st.button("Check provider readiness", use_container_width=True):
+        try:
+            probe = requests.post(f"{API_URL}/provider-smoke-test", timeout=60).json()
+            if probe.get("status") == "ready":
+                st.success("Provider smoke test passed; credentials remain private.")
+            else:
+                error = probe.get("error", {})
+                st.error(error.get("message", "Provider smoke test failed.") if isinstance(error, dict) else error)
+        except requests.RequestException as exc:
+            st.error(f"Readiness check failed: {exc}")
     uploaded_files = st.file_uploader(
         "Choose one or more source documents", type=["pdf", "txt"], accept_multiple_files=True
     )
@@ -310,8 +323,9 @@ with st.sidebar:
         render_job(job_id)
     st.markdown("---")
     st.caption(
-        f"Free-tier guard: up to {provider_status.get('effective_max_chunks', provider_status.get('max_chunks', '?'))} provider calls per document "
-        f"({provider_status.get('max_retries', 0)} retry after a quota response). "
+        f"Free-tier guard: up to {provider_status.get('effective_max_chunks', provider_status.get('max_chunks', '?'))} provider calls per document, "
+        f"{provider_status.get('max_workers', 1)} sequential worker(s), and a "
+        f"{provider_status.get('effective_max_input_chars', '?')}-character prompt budget. "
         "Use offline demo for an immediate fallback; no retry loop is started."
     )
 
@@ -398,6 +412,20 @@ data = st.session_state.get("reasoning")
 if data:
     if data.get("demo"):
         st.info("Offline demo mode: these facts are synthetic and clearly labeled.")
+    st.subheader("Review signal")
+    kpi_cols = st.columns(4)
+    kpis = [
+        ("Facts", len(facts)),
+        ("Corroborated", len(data.get("corroborations", []))),
+        ("Conflicts / context", len(data.get("contradictions", []))),
+        ("Failures", len(data.get("failures", []))),
+    ]
+    for column, (label, value) in zip(kpi_cols, kpis):
+        with column:
+            st.markdown(
+                f'<div class="kpi"><div class="kpi-value">{value}</div><div class="kpi-label">{label}</div></div>',
+                unsafe_allow_html=True,
+            )
     st.subheader("Interactive relationship graph")
     try:
         graph = api_get("/graph", timeout=20)

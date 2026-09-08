@@ -14,13 +14,17 @@ Requires Python 3.10+.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export GEMINI_API_KEY="..."
-export GEMINI_MODEL="gemini-3.5-flash"       # optional
-export GEMINI_MAX_WORKERS="2"                # optional; keep low on free tier
-export GEMINI_MAX_CHUNKS="8"                 # optional; groups pages, never drops them
-export GEMINI_MAX_RETRIES="1"                # optional; bounded 429 retry count
-export GEMINI_MAX_RETRY_WAIT_SECONDS="8"     # optional; no indefinite waits
-export LLM_MAX_INPUT_CHARS="20000"           # optional; full prompt budget, Groq-safe
+export LLM_PROVIDER=openai_compatible
+export LLM_API_KEY="gsk_..."                 # never commit or log this value
+export LLM_BASE_URL="https://api.groq.com/openai/v1"
+export LLM_MODEL="openai/gpt-oss-120b"
+export LLM_MAX_INPUT_CHARS="20000"           # complete prompt budget
+export LLM_MAX_INPUT_TOKENS="5000"           # conservative token ceiling
+export LLM_MAX_PROVIDER_CALLS="8"            # per document
+export LLM_MAX_WORKERS="1"                  # sequential free-tier default
+export LLM_MAX_RETRIES="1"
+export LLM_MAX_RETRY_WAIT_SECONDS="8"
+export LLM_REQUEST_TIMEOUT_SECONDS="45"
 python api/main.py                            # terminal 1
 streamlit run ui/app.py                       # terminal 2
 ```
@@ -75,7 +79,7 @@ curl -sS "$LLM_BASE_URL/chat/completions" \
   -d '{"model":"openai/gpt-oss-120b","temperature":0.1,"messages":[{"role":"user","content":"Return JSON only: {\"facts\":[{\"text\":\"The service handled 12 requests.\",\"value\":\"12\",\"excerpt\":\"handled 12 requests\",\"page\":1}]}"}]}'
 ```
 
-The default `GEMINI_MAX_CHUNKS=8` is a provider-call cap, not a page drop:
+The default `LLM_MAX_PROVIDER_CALLS=8` is a provider-call cap, not a page drop:
 even a 28-page document is grouped into at most 8 provider calls. The
 independent `LLM_MAX_INPUT_CHARS` budget applies to the complete generated
 prompt (instructions plus extracted text), so adjacent source chunks are grouped
@@ -83,10 +87,10 @@ only while they fit. An individual long page is split with overlap; text is neve
 silently discarded. If the document cannot fit both limits, processing fails
 clearly rather than fabricating facts.
 
-`/provider-diagnostics` exposes the active provider, model, endpoint, and a
-safe configuration hint, including effective input-character budget, maximum
-provider calls, and worker count. Never put a key in a debug script or commit it; revoke
-and rotate any key that was previously exposed that way.
+`/provider-diagnostics` exposes the active provider, model, endpoint, and safe
+budget hints. `POST /provider-smoke-test` performs one tiny JSON request and
+returns only readiness or classified error metadata. Never put a key in a debug
+script or commit it; revoke and rotate any key that was previously exposed.
 
 After changing provider settings, restart the API so the process reloads them:
 
@@ -150,6 +154,7 @@ results** restores the most recent comparison without another provider call.
 | `GET /corroborations` | Retrieve bounded related pairs and classify relationships. |
 | `GET /health` | Return readiness plus active provider, model, SDK availability, and configuration status (never credentials). |
 | `GET /provider-diagnostics` | Return safe provider configuration hints and model/endpoint metadata (never credentials). |
+| `POST /provider-smoke-test` | Make one tiny JSON readiness request and return classified safe diagnostics. |
 
 Uploads are capped at 25 MB by default (`MAX_UPLOAD_BYTES` can override it).
 State is intentionally in memory for the assignment demo and is cleared on

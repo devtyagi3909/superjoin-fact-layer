@@ -247,8 +247,16 @@ async def provider_diagnostics():
         "effective_max_input_chars": fact_layer.max_input_chars,
         "max_chunks": fact_layer.max_chunks,
         "max_workers": fact_layer.max_workers,
+        "max_input_tokens": fact_layer.max_input_tokens,
+        "request_timeout_seconds": fact_layer.request_timeout_seconds,
         "model": fact_layer.model,
     }
+
+
+@app.post("/provider-smoke-test")
+async def provider_smoke_test():
+    """Run one tiny provider call; never return keys or raw provider content."""
+    return fact_layer.provider_smoke_test()
 
 
 @app.get("/corroborations")
