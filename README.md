@@ -14,7 +14,14 @@ This repository implements an evidence-first Fact Knowledge Layer built for IPO 
 
 ## Technical Architecture
 
-The pipeline is organized into five deterministic and probabilistic stages:
+The pipeline organizes document reasoning into four decoupled layers, visualized below in an interactive 3D isometric plane architecture:
+
+<p align="center">
+  <img src="assets/architecture_3d.svg" alt="3D Isometric Fact Knowledge Layer Architecture" width="100%" />
+</p>
+
+<details>
+<summary><b>View Text Architecture Flowchart</b></summary>
 
 ```
 [ PDF / Text Ingestion ]
@@ -37,6 +44,7 @@ The pipeline is organized into five deterministic and probabilistic stages:
            ▼
 [ In-Memory Relational Graph ] ─────► NetworkX knowledge graph mapping nodes, edges, and relationship topologies
 ```
+</details>
 
 ### 1. Spatial Layout Analysis & Evidence Grounding
 Standard PDF text extraction flattens multi-column tables and financial balance sheets into unsegmented text streams, causing line-item values to interleave across adjacent columns. 
