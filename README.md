@@ -17,7 +17,7 @@ This repository implements an evidence-first Fact Knowledge Layer built for IPO 
 [![Demo Video](https://img.shields.io/badge/Demo_Video-Google_Drive-blue?style=for-the-badge&logo=google-drive)](https://drive.google.com/drive/folders/1PSGYgmFH9ONwjq4cp5amRE7ZmBKGYDCf?usp=sharing)
 
 Watch the 3-minute technical walkthrough demonstrating PDF ingestion, unit canonicalization, candidate retrieval, interactive knowledge graph visualization, and the 4 required cases:
- **[Watch the Video Walkthrough on Google Drive](https://drive.google.com/drive/folders/1PSGYgmFH9ONwjq4cp5amRE7ZmBKGYDCf?usp=sharing)**
+**[Watch the Video Walkthrough on Google Drive](https://drive.google.com/drive/folders/1PSGYgmFH9ONwjq4cp5amRE7ZmBKGYDCf?usp=sharing)**
 
 ---
 
@@ -29,29 +29,36 @@ The pipeline organizes document reasoning into four decoupled layers, visualized
   <img src="assets/architecture_diagram.svg" alt="3D Isometric Fact Knowledge Layer Architecture" width="100%" />
 </p>
 
-<details>
-<summary><b>View Text Architecture Flowchart</b></summary>
+<details open>
+<summary><b>View System Architecture Flowchart (Mermaid)</b></summary>
 
-```
-[ PDF / Text Ingestion ]
-           │
-           ▼
-[ Spatial Layout Extraction ] ──────► Preserves 2D bounding boxes & multi-column tables (PyMuPDF / Docling)
-           │
-           ▼
-[ Dynamic Token-Budget Chunker ] ───► Groups pages dynamically to prevent context overflow & rate-limit throttling
-           │
-           ▼
-[ Strict Typed Schema Extraction ] ─► Pydantic v2 models via Instructor (Subject, Predicate, Value, Unit, Scope)
-           │
-           ▼
-[ Candidate Pair Retrieval ] ───────► Inverted Lexical Index + RapidFuzz + Dense SentenceTransformer (O(N log N))
-           │
-           ▼
-[ Deterministic Logic Gates ] ──────► Canonicalizes units (₹ Mn ↔ ₹ Cr) & temporal boundaries before LLM routing
-           │
-           ▼
-[ In-Memory Relational Graph ] ─────► NetworkX knowledge graph mapping nodes, edges, and relationship topologies
+```mermaid
+flowchart TD
+    classDef pipeline fill:#1e293b,stroke:#334155,color:#f8fafc;
+    classDef store fill:#0f172a,stroke:#3b82f6,color:#f8fafc,stroke-width:2px;
+    classDef llm fill:#3b0764,stroke:#9333ea,color:#f3e8ff;
+    classDef gate fill:#064e3b,stroke:#10b981,color:#ecfdf5;
+
+    A["PDF / Text Ingestion"]:::pipeline --> B["Spatial Layout Extraction (PyMuPDF)"]:::pipeline
+    B -->|Preserves 2D bounding boxes| C["Dynamic Token-Budget Chunker"]:::pipeline
+    C -->|Prevents rate limiting| D["Strict Typed Schema Extraction"]:::llm
+    
+    D --> E[("Inverted Lexical Index")]:::store
+    
+    subgraph Retrieval ["O(N log N) Hybrid Retrieval"]
+        E --> F["RapidFuzz Lexical Alignment"]:::pipeline
+        F --> G["Dense SentenceTransformer"]:::pipeline
+    end
+
+    G -->|Candidate Pairs| H{"Deterministic Logic Gates"}:::gate
+    
+    subgraph Gates ["Canonicalization & Routing"]
+        H -->|Identical canonical units & scopes| I["Corroboration (Zero-Token)"]:::gate
+        H -->|Disjoint periods / scopes| J["Contextual (Zero-Token)"]:::gate
+        H -->|Ambiguous boundary| K["LLM Adjudication Engine"]:::llm
+    end
+
+    I & J & K --> L[("NetworkX Knowledge Graph")]:::store
 ```
 </details>
 
