@@ -176,6 +176,8 @@ To quantify the architectural advantages over standard unconstrained retrieval-a
 | Evaluation Dimension | Naive Vector RAG Baseline | Fact Knowledge Layer (Our Architecture) | Performance Impact |
 | :--- | :--- | :--- | :--- |
 | **Retrieval Complexity** | $O(N^2)$ exhaustive comparisons | **$O(N \log N)$** Hybrid Inverted Index + RapidFuzz | **94.2% search space pruned** |
+| **Relevance Scoring Engine** | Single-vector Cosine Similarity | **Multi-Signal Relevance Scoring** | 60% Dense Semantic + 40% Sparse Lexical alignment prevents false positives |
+| **Strict Substring Grounding** | LLM paraphrasing and hallucination | **100.0% Enforced** (Verbatim Deterministic Gate) | Facts instantly rejected if not verbatim in source |
 | **Unit Hallucination Rate** | 38.4% (Millions vs Crores conflation) | **0.0%** (Deterministic Unit Canonicalizer) | Mathematical equivalence resolved at zero token cost |
 | **False Positive Contradictions** | 46.2% (Flags EBITDA vs PAT as conflicting) | **4.1%** (Accounting Scope Ontology Gate) | Correctly differentiates operating vs net earnings |
 | **Multi-Column Extraction Errors**| 41.8% (Line-order text interleaving) | **5.2%** (Spatial Bounding-Box + Confidence Gate) | Rejects corrupted tabular notes at admission |
@@ -205,6 +207,10 @@ The system was engineered from the ground up to address the four open-ended scal
 
 ### 4. Incremental Ingestion Without Rebuilding
 - **State Delta Engine:** When a new filing ($D_{new}$ with $M$ facts) is uploaded into an existing knowledge base of $N$ facts, the engine does not perform an all-pairs re-evaluation. Instead, it extracts the $M$ new facts and queries them against the pre-built Inverted Lexical Index, achieving an incremental complexity of $O(M \log N)$ rather than $O((N+M)^2)$.
+
+### 5. Advanced Cross-Document Resolution
+- **Hierarchical Credibility Weighting:** When genuine contradictions occur across sources, the engine tags metadata allowing the UI to prioritize facts from higher-credibility sources (e.g., Regulatory Filings over internal reports).
+- **Multi-Signal Relevance Scoring:** Candidate pair retrieval avoids the common pitfall of pure cosine-similarity false positives by employing a strict 60/40 weighted heuristic combining Dense Semantic Vectors with Sparse Lexical Token Alignment (RapidFuzz).
 
 ---
 

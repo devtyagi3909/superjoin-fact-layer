@@ -1100,7 +1100,15 @@ Page markers are authoritative:
                     if norm(vec1) > 0 and norm(vec2) > 0:
                         cosine_sim = dot(vec1, vec2) / (norm(vec1) * norm(vec2))
                 
-                score = max(fuzz_score / 100.0, cosine_sim)
+                fuzz_val = fuzz_score / 100.0
+                
+                # Multi-Signal Relevance Scoring:
+                # 60% Semantic Vector Similarity (Dense) + 40% Lexical Token Alignment (Sparse)
+                if embeddings is not None:
+                    score = (0.6 * cosine_sim) + (0.4 * fuzz_val)
+                else:
+                    score = fuzz_val
+                
                 if score >= 0.85:
                     pairs.add(tuple(sorted((i, j))))
                 elif score >= 0.75:
